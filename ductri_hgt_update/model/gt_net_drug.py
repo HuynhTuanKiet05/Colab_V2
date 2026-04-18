@@ -34,19 +34,16 @@ class GraphTransformer(nn.Module):
         # input embedding
         if g.device != self.device:
             g = g.to(self.device)
-        h = g.ndata['drs'].float()
-        if h.device != self.device:
-            h = h.to(self.device)
+        with g.local_scope():
+            h = g.ndata['drs'].float()
+            if h.device != self.device:
+                h = h.to(self.device)
 
-        h = self.linear_h(h)
-        # h = self.in_feat_dropout(h)
+            h = self.linear_h(h)
+            # h = self.in_feat_dropout(h)
 
-        # convnets
-        for conv in self.layers:
-            h= conv(g, h)
+            # convnets
+            for conv in self.layers:
+                h = conv(g, h)
 
-        g.ndata['h'] = h
-
-        # h = dgl.mean_nodes(g, 'h')
-
-        return h
+            return h
