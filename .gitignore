@@ -18,5 +18,17 @@ Thumbs.db
 # Logs
 *.log
 
+# Database Config (Sensitive)
+app/config.php
+
+# Large AI Models / Data
+*.pth
+*.pkl
+data/
+ductri_hgt_update/data/
+ductri_hgt_update/Result/
+node_modules/
+vendor/
+
 # Large local artifacts
 *.vsix

@@ -18,7 +18,6 @@ class PredictionService
         $response = curl_exec($ch);
         $error = curl_error($ch);
         $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
 
         if ($response === false || $error || $statusCode >= 400) {
             return false;
@@ -28,13 +27,14 @@ class PredictionService
         return is_array($decoded) && ($decoded['status'] ?? null) === 'ok';
     }
 
-    public static function callPythonApi(string $queryType, string $inputText, int $topK = 10): array
+    public static function callPythonApi(string $queryType, string $inputText, int $topK = 10, string $dataset = 'C-dataset'): array
     {
         $url = rtrim((string) config('python_api.base_url'), '/') . '/predict';
         $payload = json_encode([
             'query_type' => $queryType,
             'input_text' => $inputText,
             'top_k' => $topK,
+            'dataset' => $dataset,
         ], JSON_UNESCAPED_UNICODE);
 
         $ch = curl_init($url);
@@ -49,7 +49,6 @@ class PredictionService
         $response = curl_exec($ch);
         $error = curl_error($ch);
         $statusCode = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
 
         if ($response === false || $error) {
             throw new RuntimeException('Không thể kết nối Python API: ' . $error);
@@ -70,6 +69,19 @@ class PredictionService
     public static function saveHistory(int $userId, string $queryType, string $inputText, int $topK, array $apiResult): int
     {
         $matched = $apiResult['matched_input'] ?? [];
+        $matchedSourceCode = $matched['id'] ?? null;
+        $matchedType = $matched['type'] ?? null;
+        $matchedInternalId = null;
+
+        if ($matchedSourceCode && $matchedType) {
+            $table = ($matchedType === 'drug') ? 'drugs' : 'diseases';
+            $lookupStmt = db()->prepare("SELECT id FROM $table WHERE source_code = :code LIMIT 1");
+            $lookupStmt->execute(['code' => $matchedSourceCode]);
+            $row = $lookupStmt->fetch();
+            if ($row) {
+                $matchedInternalId = (int) $row['id'];
+            }
+        }
 
         $stmt = db()->prepare(
             'INSERT INTO prediction_requests (user_id, query_type, input_text, matched_entity_id, matched_entity_type, top_k, status, request_ip)
@@ -80,8 +92,8 @@ class PredictionService
             'user_id' => $userId,
             'query_type' => $queryType,
             'input_text' => $inputText,
-            'matched_entity_id' => $matched['id'] ?? null,
-            'matched_entity_type' => $matched['type'] ?? null,
+            'matched_entity_id' => $matchedInternalId,
+            'matched_entity_type' => $matchedType,
             'top_k' => $topK,
             'status' => 'success',
             'request_ip' => $_SERVER['REMOTE_ADDR'] ?? '127.0.0.1',
@@ -95,11 +107,25 @@ class PredictionService
         );
 
         foreach (($apiResult['results'] ?? []) as $index => $item) {
+            $itemType = $item['type'] ?? 'disease';
+            $itemSourceCode = $item['id'] ?? null;
+            $itemInternalId = null;
+
+            if ($itemSourceCode) {
+                $itemTable = ($itemType === 'drug') ? 'drugs' : 'diseases';
+                $itemLookup = db()->prepare("SELECT id FROM $itemTable WHERE source_code = :code LIMIT 1");
+                $itemLookup->execute(['code' => $itemSourceCode]);
+                $itemRow = $itemLookup->fetch();
+                if ($itemRow) {
+                    $itemInternalId = (int) $itemRow['id'];
+                }
+            }
+
             $resultStmt->execute([
                 'request_id' => $requestId,
                 'rank_no' => $index + 1,
-                'result_entity_type' => $item['type'] ?? 'disease',
-                'result_entity_id' => $item['id'] ?? null,
+                'result_entity_type' => $itemType,
+                'result_entity_id' => $itemInternalId,
                 'result_name' => $item['name'] ?? 'Unknown',
                 'score' => $item['score'] ?? 0,
                 'metadata_json' => json_encode($item, JSON_UNESCAPED_UNICODE),

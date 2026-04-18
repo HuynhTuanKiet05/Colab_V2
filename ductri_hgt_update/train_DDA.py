@@ -12,6 +12,7 @@ import torch.nn.functional as fn
 from data_preprocess import *
 from model.AMNTDDA import AMNTDDA
 from metric import *
+import gc
 
 device = torch.device(os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu'))
 
@@ -274,6 +275,16 @@ if __name__ == '__main__':
                 best_auc = AUC
                 best_aupr, best_accuracy, best_precision, best_recall, best_f1, best_mcc = AUPR, accuracy, precision, recall, f1, mcc
                 last_improve_epoch = current_epoch
+                
+                # Force garbage collection and clear GPU cache before saving to prevent OOM
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                
+                # Save the best model weights
+                model_path = os.path.join(args.result_dir, 'best_model.pth')
+                torch.save(model.state_dict(), model_path)
+                
                 print(
                     args.early_stop_metric.upper(),
                     'improved at epoch',
@@ -282,6 +293,7 @@ if __name__ == '__main__':
                     round(best_auc, 5),
                     ';\tbest_aupr:',
                     round(best_aupr, 5),
+                    f';\tmodel saved to: {os.path.basename(model_path)}'
                 )
 
             if args.use_early_stop and current_epoch >= args.early_stop_start_epoch:
@@ -342,8 +354,11 @@ if __name__ == '__main__':
         AUPRs,
         total_training_time,
     )
-    print('Saved fold results to:', fold_result_path)
-    print('Updated train history at:', history_path)
+    try:
+        print('Saved fold results to:', fold_result_path)
+        print('Updated train history at:', history_path)
+    except UnicodeEncodeError:
+        print('Saved fold results to disk successfully (paths contain non-ASCII characters).')
 
 
 

@@ -10,7 +10,7 @@ return [
         'port' => 3306,
         'dbname' => 'drug_disease_ai',
         'username' => 'root',
-        'password' => '',
+        'password' => '123456',
         'charset' => 'utf8mb4',
     ],
     'python_api' => [
