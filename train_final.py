@@ -161,7 +161,8 @@ def build_path_prior(data, train_positive_edges, args):
     dipr = torch.zeros((protein_n, disease_n), dtype=torch.float32)
     if data['dipr'].size > 0:
         dipr_idx = torch.as_tensor(data['dipr'], dtype=torch.long)
-        dipr[dipr_idx[:, 0], dipr_idx[:, 1]] = 1.0
+        # CSV stores (disease, protein); convert to (protein, disease)
+        dipr[dipr_idx[:, 1], dipr_idx[:, 0]] = 1.0
 
     shared_paths = drpr @ dipr
     shared_norm = shared_paths / shared_paths.max().clamp_min(1.0)
