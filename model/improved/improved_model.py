@@ -206,6 +206,7 @@ class AMNTDDA(nn.Module):
             nn.Dropout(args.dropout),
             nn.Linear(args.gt_out_dim, 1),
         )
+        self.topology_scale = nn.Parameter(torch.tensor(0.15))
         self.pair_scorer = PairMixtureOfExperts(args.gt_out_dim, args.dropout)
 
     def _prepare_graph_dict(self, graph_input, graph_names):
@@ -271,7 +272,7 @@ class AMNTDDA(nn.Module):
 
         pair_drug = drug_repr[sample[:, 0]]
         pair_disease = disease_repr[sample[:, 1]]
-        topology_score = self.topology_scorer(torch.cat([pair_drug, pair_disease], dim=-1))
+        topology_score = self.topology_scale * torch.tanh(self.topology_scorer(torch.cat([pair_drug, pair_disease], dim=-1)))
         output = self.pair_scorer(pair_drug, pair_disease, topology_score=topology_score)
 
         self.cached_aux = {

@@ -169,8 +169,8 @@ class RLGHGTLayer(nn.Module):
 
             # Branch-specific gating with relation/meta/global focus.
             branch_stack = torch.stack([local, meta, topo, global_ctx], dim=1)
-            branch_gate = self.branch_gate[ntype](torch.cat([local, meta, topo, global_ctx], dim=-1))
-            branch_mix = (branch_gate.unsqueeze(1) * branch_stack).sum(dim=1)
+            branch_gate = torch.softmax(self.branch_gate[ntype](torch.cat([local, meta, topo, global_ctx], dim=-1)), dim=-1)
+            branch_mix = (branch_gate.unsqueeze(-1) * branch_stack).sum(dim=1)
 
             fused = h_dict[ntype] + cur_layer_w * self.dropout(branch_mix)
             fused = self.norm1[ntype](fused)

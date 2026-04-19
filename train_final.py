@@ -250,6 +250,7 @@ if __name__ == '__main__':
             dtype=torch.float32,
             device=device,
         )).mean()
+        topology_bonus = 0.001 * topology_bonus
 
         start = timeit.default_timer()
 
@@ -280,7 +281,7 @@ if __name__ == '__main__':
             ranking_loss = pair_ranking_loss(train_score, Y_train, args.ranking_margin, args.ranking_samples)
             contrastive_loss = aux_losses['contrastive']
             train_loss = classification_loss + args.ranking_weight * ranking_loss + args.contrastive_weight * contrastive_loss
-            train_loss = train_loss + 0.01 * topology_bonus
+            train_loss = train_loss + topology_bonus
 
             optimizer.zero_grad()
             train_loss.backward()
