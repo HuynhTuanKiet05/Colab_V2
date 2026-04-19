@@ -6,10 +6,13 @@ from sklearn.metrics import (auc, accuracy_score, precision_score, recall_score,
 def get_metric(y_true, y_pred, y_prob):
 
     accuracy = accuracy_score(y_true, y_pred)
-    mcc = matthews_corrcoef(y_true, y_pred)
-    precision = precision_score(y_true, y_pred)
-    recall = recall_score(y_true, y_pred)
-    f1 = f1_score(y_true, y_pred)
+    if len(np.unique(y_true)) < 2 or len(np.unique(y_pred)) < 2:
+        mcc = 0.0
+    else:
+        mcc = matthews_corrcoef(y_true, y_pred)
+    precision = precision_score(y_true, y_pred, zero_division=0)
+    recall = recall_score(y_true, y_pred, zero_division=0)
+    f1 = f1_score(y_true, y_pred, zero_division=0)
 
     fpr, tpr, _ = roc_curve(y_true, y_prob)
     Auc = auc(fpr, tpr)

@@ -103,7 +103,7 @@ def data_processing(data, args):
 
 def k_fold(data, args):
     k = args.k_fold
-    skf = StratifiedKFold(n_splits=k, random_state=None, shuffle=False)
+    skf = StratifiedKFold(n_splits=k, random_state=args.random_seed, shuffle=True)
     X = data['all_drdi']
     Y = data['all_label']
     # n = skf.get_n_splits(X, Y)
@@ -150,6 +150,31 @@ def dgl_similarity_graph(data, args):
     didi_graph.ndata['dis'] = torch.tensor(data['dis'])
 
     return drdr_graph, didi_graph, data
+
+
+def _build_similarity_graph(matrix, feature_key, k):
+    graph_matrix = k_matrix(matrix, k)
+    if hasattr(nx, 'from_numpy_array'):
+        nx_graph = nx.from_numpy_array(graph_matrix)
+    else:
+        nx_graph = nx.from_numpy_matrix(graph_matrix)
+    graph = dgl.from_networkx(nx_graph)
+    graph.ndata[feature_key] = torch.tensor(matrix)
+    return graph
+
+
+def dgl_similarity_view_graphs(data, args):
+    drug_graphs = {
+        'fingerprint': _build_similarity_graph(data['drf'], 'drs', args.neighbor),
+        'gip': _build_similarity_graph(data['drg'], 'drs', args.neighbor),
+        'consensus': _build_similarity_graph(data['drs'], 'drs', args.neighbor),
+    }
+    disease_graphs = {
+        'phenotype': _build_similarity_graph(data['dip'], 'dis', args.neighbor),
+        'gip': _build_similarity_graph(data['dig'], 'dis', args.neighbor),
+        'consensus': _build_similarity_graph(data['dis'], 'dis', args.neighbor),
+    }
+    return drug_graphs, disease_graphs, data
 
 
 def dgl_heterograph(data, drdi, args):
