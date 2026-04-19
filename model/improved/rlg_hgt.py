@@ -143,7 +143,8 @@ class RLGHGTLayer(nn.Module):
             local_out[dsttype] = local_out[dsttype] + self._attn_message(rel_graph, h_dict, srctype, dsttype, rel_id)
 
         new_h = {}
-        layer_w = 1.0
+        layer_w = torch.softmax(self.layer_alpha, dim=0)
+        cur_layer_w = layer_w.mean()
         for ntype in self.node_types:
             local = self.out_proj[ntype](local_out[ntype])
 
@@ -172,7 +173,7 @@ class RLGHGTLayer(nn.Module):
             branch_gate = self.branch_gate[ntype](torch.cat([local, meta, topo, global_ctx], dim=-1))
             branch_mix = (branch_gate.unsqueeze(1) * branch_stack).sum(dim=1)
 
-            fused = h_dict[ntype] + layer_w * self.dropout(branch_mix)
+            fused = h_dict[ntype] + cur_layer_w * self.dropout(branch_mix)
             fused = self.norm1[ntype](fused)
             fused = self.norm2[ntype](fused + self.dropout(self.ffn[ntype](fused)))
             new_h[ntype] = fused
@@ -229,6 +230,7 @@ class RLGHGT(nn.Module):
             for _ in range(num_layers)
         ])
         self.layer_scores = nn.ModuleDict({ntype: nn.Linear(hidden_dim, 1) for ntype in node_types})
+        self.layer_alpha = nn.Parameter(torch.zeros(num_layers))
         self.node_types = list(node_types)
         self._metapath_cache_key: Optional[int] = None
         self._metapath_cache: Dict[str, List[Tuple[str, dgl.DGLGraph]]] = {}

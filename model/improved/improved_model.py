@@ -58,16 +58,16 @@ class AMNTDDA(nn.Module):
             use_topological=getattr(args, 'use_topological', True),
         )
 
-        pair_dim = args.gt_out_dim * 4
         fused_dim = args.gt_out_dim * 2
+        pair_dim = fused_dim * 5
         self.fused_norm_dr = nn.LayerNorm(fused_dim)
         self.fused_norm_di = nn.LayerNorm(fused_dim)
         self.pair_norm = nn.LayerNorm(pair_dim)
         self.residual_mlp = nn.Sequential(
-            nn.Linear(pair_dim, 256),
+            nn.Linear(pair_dim, 512),
             nn.GELU(),
             nn.Dropout(0.2),
-            nn.Linear(256, 256),
+            nn.Linear(512, 256),
             nn.GELU(),
             nn.Dropout(0.2),
             nn.Linear(256, 2)
@@ -101,17 +101,15 @@ class AMNTDDA(nn.Module):
         dr = dr_gate * dr_sim + (1 - dr_gate) * dr_hgt
         di = di_gate * di_sim + (1 - di_gate) * di_hgt
 
-        # Lightweight refinement: keep the fused representation stable and avoid
-        # extra sequence-level autograd state that can be costly on Windows.
-        dr = torch.cat([dr, dr_hgt], dim=-1)
-        di = torch.cat([di, di_hgt], dim=-1)
-        dr = self.fused_norm_dr(dr)
-        di = self.fused_norm_di(di)
-
-        pair_mul = torch.mul(dr[sample[:, 0]], di[sample[:, 1]])
+        # Multi-view structural refinement: combine pairwise graph view,
+        # HGT view and absolute difference view before the scorer.
+        dr = self.fused_norm_dr(torch.cat([dr, dr_hgt], dim=-1))
+        di = self.fused_norm_di(torch.cat([di, di_hgt], dim=-1))
+        pair_mul = dr[sample[:, 0]] * di[sample[:, 1]]
         pair_diff = torch.abs(dr[sample[:, 0]] - di[sample[:, 1]])
-        drdi_embedding = torch.cat([pair_mul, pair_diff], dim=-1)
-        drdi_embedding = self.pair_norm(drdi_embedding)
+        pair_sum = dr[sample[:, 0]] + di[sample[:, 1]]
+        pair_stack = torch.cat([pair_mul, pair_diff, pair_sum, dr[sample[:, 0]], di[sample[:, 1]]], dim=-1)
+        drdi_embedding = self.pair_norm(pair_stack)
 
         output = self.residual_mlp(drdi_embedding) + self.residual_skip(drdi_embedding)
 
