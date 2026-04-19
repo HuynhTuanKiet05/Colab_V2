@@ -254,16 +254,9 @@ if __name__ == '__main__':
         warm_focal_criterion = FocalLoss(alpha=class_weights, gamma=args.focal_gamma_warm, reduction='none')
 
         train_positive_edges = positive_training_edges(data['X_train'][i], data['Y_train'][i])
-        drdipr_graph, data = dgl_heterograph(data, train_positive_edges, args)
+        drdipr_graph, data, edge_stats = dgl_heterograph(data, train_positive_edges, args)
         drdipr_graph = drdipr_graph.to(device)
-        topology_bonus = torch.log1p(torch.tensor(
-            [drdipr_graph.num_edges(('drug', 'association', 'disease')),
-             drdipr_graph.num_edges(('drug', 'association', 'protein')),
-             drdipr_graph.num_edges(('disease', 'association', 'protein'))],
-            dtype=torch.float32,
-            device=device,
-        )).mean()
-        topology_bonus = 0.001 * topology_bonus
+        edge_stats = {k: v.to(device) for k, v in edge_stats.items()}
 
         start = timeit.default_timer()
 
@@ -277,6 +270,7 @@ if __name__ == '__main__':
                 disease_feature,
                 protein_feature,
                 X_train,
+                edge_stats=edge_stats,
                 return_aux=True,
             )
 
@@ -328,6 +322,7 @@ if __name__ == '__main__':
                         disease_feature,
                         protein_feature,
                         X_test,
+                        edge_stats=edge_stats,
                     )
                 if backup_state is not None:
                     model.load_state_dict(backup_state, strict=False)

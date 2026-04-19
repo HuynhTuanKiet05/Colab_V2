@@ -219,7 +219,16 @@ def dgl_heterograph(data, drdi, args):
 
     drdipr_graph = dgl.heterograph(heterograph_dict, num_nodes_dict=node_dict)
 
-    return drdipr_graph, data
+    edge_stats = {
+        'pair_bias': torch.log1p(torch.tensor(
+            [drdipr_graph.num_edges(('drug', 'association', 'disease')),
+             drdipr_graph.num_edges(('drug', 'association', 'protein')),
+             drdipr_graph.num_edges(('disease', 'association', 'protein'))],
+            dtype=torch.float32,
+        )).mean().view(1, 1)
+    }
+
+    return drdipr_graph, data, edge_stats
 
 
 

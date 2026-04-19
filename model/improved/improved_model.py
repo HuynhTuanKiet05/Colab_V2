@@ -232,7 +232,7 @@ class AMNTDDA(nn.Module):
         labels = torch.arange(lhs.shape[0], device=lhs.device)
         return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
 
-    def forward(self, drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, sample, return_aux=False):
+    def forward(self, drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, sample, edge_stats=None, return_aux=False):
         drug_views = self._encode_similarity_views(drdr_graph, self.drug_view_encoders)
         disease_views = self._encode_similarity_views(didi_graph, self.disease_view_encoders)
 
@@ -274,7 +274,10 @@ class AMNTDDA(nn.Module):
         pair_drug = drug_repr[sample[:, 0]]
         pair_disease = disease_repr[sample[:, 1]]
         topology_score = self.topology_scale * torch.tanh(self.topology_scorer(torch.cat([pair_drug, pair_disease], dim=-1)))
-        output = self.pair_scorer(pair_drug, pair_disease, topology_score=topology_score)
+        edge_bias = torch.zeros_like(topology_score)
+        if edge_stats is not None:
+            edge_bias = edge_stats.get('pair_bias', edge_bias)
+        output = self.pair_scorer(pair_drug, pair_disease, topology_score=topology_score + edge_bias)
 
         self.cached_aux = {
             'contrastive': self._contrastive_loss(self.drug_align_sim(drug_view_fused), self.drug_align_hgt(drug_hgt))
@@ -284,6 +287,7 @@ class AMNTDDA(nn.Module):
             'drug_token_weights': drug_token_weights.detach(),
             'disease_token_weights': disease_token_weights.detach(),
             'topology_score': topology_score.detach(),
+            'edge_bias': edge_bias.detach(),
         }
 
         if return_aux:
