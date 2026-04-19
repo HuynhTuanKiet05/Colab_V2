@@ -58,7 +58,7 @@ class PairMixtureOfExperts(nn.Module):
     def __init__(self, dim, dropout):
         super().__init__()
         pair_dim = dim * 6 + 4
-        gate_dim = dim * 3 + 4
+        gate_dim = dim * 3 + 5
         hidden = max(dim * 3, 256)
         compact = max(dim * 2, 192)
 
@@ -74,8 +74,8 @@ class PairMixtureOfExperts(nn.Module):
             nn.Linear(compact, 2),
         )
         self.expert_local = nn.Sequential(
-            nn.LayerNorm(dim * 3 + 4),
-            nn.Linear(dim * 3 + 4, compact),
+            nn.LayerNorm(dim * 3 + 5),
+            nn.Linear(dim * 3 + 5, compact),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(compact, 2),
@@ -87,6 +87,7 @@ class PairMixtureOfExperts(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(compact, 3),
         )
+        self.topology_scale = nn.Parameter(torch.tensor(1.0))
         self.skip = nn.Linear(pair_dim, 2)
 
     def forward(self, drug_repr, disease_repr, topology_score=None):
