@@ -178,8 +178,11 @@ def build_path_prior(data, train_positive_edges, args):
 
 def gather_pair_bias(pair_index, prior_matrix, device, scale=0.22):
     idx = pair_index.long().detach().cpu()
+    idx = idx.clone()
+    idx[:, 0] = idx[:, 0].clamp(0, prior_matrix.shape[0] - 1)
+    idx[:, 1] = idx[:, 1].clamp(0, prior_matrix.shape[1] - 1)
     bias = prior_matrix[idx[:, 0], idx[:, 1]].to(device)
-    return {'pair_bias': scale * bias.unsqueeze(-1)}
+    return scale * bias.unsqueeze(-1)
 
 
 def hard_negative_mining_loss(logits, targets, top_ratio=0.25, margin=0.18):
@@ -343,7 +346,9 @@ if __name__ == '__main__':
         for epoch in range(args.epochs):
             model.train()
             phase = phase_weights(epoch, args)
-            edge_stats['pair_bias'] = edge_stats['pair_bias'] + 0.45 * path_prior[X_train[:, 0], X_train[:, 1]].unsqueeze(-1)
+            train_edge_stats = {
+                'pair_bias': edge_stats['pair_bias'] + gather_pair_bias(X_train, path_prior, device, scale=0.45)
+            }
             _, train_score, aux_losses = model(
                 drug_view_graphs,
                 disease_view_graphs,
@@ -352,7 +357,7 @@ if __name__ == '__main__':
                 disease_feature,
                 protein_feature,
                 X_train,
-                edge_stats=edge_stats,
+                edge_stats=train_edge_stats,
                 return_aux=True,
             )
 
@@ -404,7 +409,7 @@ if __name__ == '__main__':
                         disease_feature,
                         protein_feature,
                         X_test,
-                        edge_stats={'pair_bias': edge_stats['pair_bias'][X_test[:, 0], X_test[:, 1]].unsqueeze(-1)},
+                        edge_stats=None,
                     )
                 if backup_state is not None:
                     model.load_state_dict(backup_state, strict=False)
