@@ -4,14 +4,12 @@ import torch.nn as nn
 from AMDGT_original.model import gt_net_drug, gt_net_disease
 from .rlg_hgt import RLGHGT
 
-# Keep DGL graph execution on CPU for Windows compatibility.
-device = torch.device(os.environ.get('AMDGT_DEVICE', 'cpu'))
-
 
 class AMNTDDA(nn.Module):
     def __init__(self, args):
         super(AMNTDDA, self).__init__()
         self.args = args
+        self.runtime_device = torch.device(os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu'))
         self.drug_linear = nn.Linear(300, args.hgt_in_dim)
         self.disease_linear = nn.Linear(64, args.hgt_in_dim)
         self.protein_linear = nn.Linear(320, args.hgt_in_dim)
@@ -21,9 +19,9 @@ class AMNTDDA(nn.Module):
         self.input_dropout = nn.Dropout(args.dropout)
         self.hgt_drug_out = nn.Linear(args.hgt_in_dim, args.gt_out_dim)
         self.hgt_disease_out = nn.Linear(args.hgt_in_dim, args.gt_out_dim)
-        self.gt_drug = gt_net_drug.GraphTransformer(device, args.gt_layer, args.drug_number, args.gt_out_dim, args.gt_out_dim,
+        self.gt_drug = gt_net_drug.GraphTransformer(self.runtime_device, args.gt_layer, args.drug_number, args.gt_out_dim, args.gt_out_dim,
                                                     args.gt_head, args.dropout)
-        self.gt_disease = gt_net_disease.GraphTransformer(device, args.gt_layer, args.disease_number, args.gt_out_dim,
+        self.gt_disease = gt_net_disease.GraphTransformer(self.runtime_device, args.gt_layer, args.disease_number, args.gt_out_dim,
                                                     args.gt_out_dim, args.gt_head, args.dropout)
 
         encoder_layer = nn.TransformerEncoderLayer(d_model=args.gt_out_dim, nhead=args.tr_head, dropout=args.dropout, batch_first=True)

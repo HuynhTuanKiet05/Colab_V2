@@ -132,7 +132,7 @@ class RLGHGTLayer(nn.Module):
         stacked = torch.stack(path_msgs, dim=0)
         return (weights.unsqueeze(-1) * stacked).sum(dim=0)
 
-    def forward(self, g, h_dict, metapath_cache=None):
+    def forward(self, g, h_dict, metapath_cache=None, residual_weight=None):
         local_out = {ntype: torch.zeros(g.num_nodes(ntype), self.out_dim, device=h_dict[ntype].device) for ntype in self.node_types}
         for canonical_etype in self.canonical_etypes:
             srctype, _, dsttype = canonical_etype
@@ -143,8 +143,7 @@ class RLGHGTLayer(nn.Module):
             local_out[dsttype] = local_out[dsttype] + self._attn_message(rel_graph, h_dict, srctype, dsttype, rel_id)
 
         new_h = {}
-        layer_w = torch.softmax(self.layer_alpha, dim=0)
-        cur_layer_w = layer_w.mean()
+        cur_layer_w = 1.0 if residual_weight is None else residual_weight
         for ntype in self.node_types:
             local = self.out_proj[ntype](local_out[ntype])
 
@@ -257,10 +256,11 @@ class RLGHGT(nn.Module):
         hs = {ntype: [h_dict[ntype]] for ntype in self.node_types}
         cur = h_dict
         metapath_cache = None
+        layer_weights = torch.softmax(self.layer_alpha, dim=0)
         if self.layers and self.layers[0].use_metapath:
             metapath_cache = self._get_metapath_cache(g)
-        for layer in self.layers:
-            cur = layer(g, cur, metapath_cache)
+        for idx, layer in enumerate(self.layers):
+            cur = layer(g, cur, metapath_cache, residual_weight=layer_weights[idx])
             for ntype in self.node_types:
                 hs[ntype].append(cur[ntype])
 

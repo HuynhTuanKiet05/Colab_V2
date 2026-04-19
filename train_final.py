@@ -8,16 +8,46 @@ import torch.nn as nn
 import torch.nn.functional as fn
 import os
 import gc
+from pathlib import Path
 
 # Import from the root modules
 from data_preprocess_improved import get_data, data_processing, k_fold, dgl_similarity_graph, dgl_heterograph
 from model.improved.improved_model import AMNTDDA
 from metric import get_metric
 
-# Set device
-# DGL on this Windows setup is built without CUDA support, so we fall back to CPU
-# to avoid runtime errors when moving DGL graphs to GPU.
-device = torch.device('cpu')
+
+REQUIRED_DATA_FILES = [
+    'DrugFingerprint.csv',
+    'DrugGIP.csv',
+    'DiseasePS.csv',
+    'DiseaseGIP.csv',
+    'DrugDiseaseAssociationNumber.csv',
+    'DrugProteinAssociationNumber.csv',
+    'ProteinDiseaseAssociationNumber.csv',
+    'Drug_mol2vec.csv',
+    'DiseaseFeature.csv',
+    'Protein_ESM.csv',
+]
+
+
+def resolve_device(device_name):
+    if device_name == 'auto':
+        device_name = os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu')
+    return torch.device(device_name)
+
+
+def set_random_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def validate_data_dir(data_dir):
+    missing = [name for name in REQUIRED_DATA_FILES if not os.path.exists(os.path.join(data_dir, name))]
+    if missing:
+        joined = ', '.join(missing)
+        raise FileNotFoundError(f'Missing dataset files in {data_dir}: {joined}')
 
 
 class EarlyStopping:
@@ -73,6 +103,9 @@ if __name__ == '__main__':
     parser.add_argument('--negative_rate', type=float, default=1.0, help='negative_rate')
     parser.add_argument('--dataset', default='C-dataset', help='dataset')
     parser.add_argument('--dropout', default=0.25, type=float, help='dropout')
+    parser.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'], help='training device')
+    parser.add_argument('--data_root', default=None, help='dataset directory; defaults to AMDGT_original/data/<dataset>')
+    parser.add_argument('--result_root', default=None, help='output directory; defaults to Result/improved/<dataset>')
     parser.add_argument('--warmup_epochs', default=250, type=int, help='epochs to train before switching to focal fine-tune')
     parser.add_argument('--patience', default=120, type=int, help='early stopping patience')
     parser.add_argument('--target_auc', default=0.96, type=float, help='target AUC to keep training toward')
@@ -99,14 +132,21 @@ if __name__ == '__main__':
     parser.add_argument('--use_topological', action=argparse.BooleanOptionalAction, default=True, help='Use topological metapath projection')
 
     args = parser.parse_args()
+    device = resolve_device(args.device)
+    os.environ['AMDGT_DEVICE'] = device.type
+    set_random_seed(args.random_seed)
 
     # Setup directories
-    args.data_dir = 'AMDGT_original/data/' + args.dataset + '/'
-    args.result_dir = 'Result/improved/' + args.dataset + '/'
+    default_data_dir = Path('AMDGT_original') / 'data' / args.dataset
+    default_result_dir = Path('Result') / 'improved' / args.dataset
+    args.data_dir = str(Path(args.data_root) if args.data_root else default_data_dir)
+    args.result_dir = str(Path(args.result_root) if args.result_root else default_result_dir)
+    validate_data_dir(args.data_dir)
     os.makedirs(args.result_dir, exist_ok=True)
 
     print(f"--- Starting Final Improved Pipeline ---")
     print(f"Dataset: {args.dataset} | LR: {args.lr} | Dim: {args.gt_out_dim} | Neighbor: {args.neighbor}")
+    print(f"Device: {device} | Data dir: {args.data_dir} | Result dir: {args.result_dir}")
 
     data = get_data(args)
     args.drug_number = data['drug_number']
@@ -269,4 +309,4 @@ if __name__ == '__main__':
 
     csv_path = os.path.join(args.result_dir, '10_fold_results_improved.csv')
     final_df.to_csv(csv_path, index=False)
-    print(f'\nKết quả cải tiến đã được lưu tại: {csv_path}')
+    print(f'\nSaved improved results to: {csv_path}')

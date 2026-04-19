@@ -28,12 +28,13 @@ def k_matrix(matrix, k):
 
 def get_data(args):
     data = dict()
+    data_dir = args.data_dir
 
-    drf = pd.read_csv(args.data_dir + 'DrugFingerprint.csv').iloc[:, 1:].to_numpy()
-    drg = pd.read_csv(args.data_dir + 'DrugGIP.csv').iloc[:, 1:].to_numpy()
+    drf = pd.read_csv(os.path.join(data_dir, 'DrugFingerprint.csv')).iloc[:, 1:].to_numpy()
+    drg = pd.read_csv(os.path.join(data_dir, 'DrugGIP.csv')).iloc[:, 1:].to_numpy()
 
-    dip = pd.read_csv(args.data_dir + 'DiseasePS.csv').iloc[:, 1:].to_numpy()
-    dig = pd.read_csv(args.data_dir + 'DiseaseGIP.csv').iloc[:, 1:].to_numpy()
+    dip = pd.read_csv(os.path.join(data_dir, 'DiseasePS.csv')).iloc[:, 1:].to_numpy()
+    dig = pd.read_csv(os.path.join(data_dir, 'DiseaseGIP.csv')).iloc[:, 1:].to_numpy()
 
     data['drug_number'] = int(drf.shape[0])
     data['disease_number'] = int(dig.shape[0])
@@ -43,13 +44,13 @@ def get_data(args):
     data['dip'] = dip
     data['dig'] = dig
 
-    data['drdi'] = pd.read_csv(args.data_dir + 'DrugDiseaseAssociationNumber.csv', dtype=int).to_numpy()
-    data['drpr'] = pd.read_csv(args.data_dir + 'DrugProteinAssociationNumber.csv', dtype=int).to_numpy()
-    data['dipr'] = pd.read_csv(args.data_dir + 'ProteinDiseaseAssociationNumber.csv', dtype=int).to_numpy()
+    data['drdi'] = pd.read_csv(os.path.join(data_dir, 'DrugDiseaseAssociationNumber.csv'), dtype=int).to_numpy()
+    data['drpr'] = pd.read_csv(os.path.join(data_dir, 'DrugProteinAssociationNumber.csv'), dtype=int).to_numpy()
+    data['dipr'] = pd.read_csv(os.path.join(data_dir, 'ProteinDiseaseAssociationNumber.csv'), dtype=int).to_numpy()
 
-    data['drugfeature'] = pd.read_csv(args.data_dir + 'Drug_mol2vec.csv', header=None).iloc[:, 1:].to_numpy()
-    data['diseasefeature'] = pd.read_csv(args.data_dir + 'DiseaseFeature.csv', header=None).iloc[:, 1:].to_numpy()
-    data['proteinfeature'] = pd.read_csv(args.data_dir + 'Protein_ESM.csv', header=None).iloc[:, 1:].to_numpy()
+    data['drugfeature'] = pd.read_csv(os.path.join(data_dir, 'Drug_mol2vec.csv'), header=None).iloc[:, 1:].to_numpy()
+    data['diseasefeature'] = pd.read_csv(os.path.join(data_dir, 'DiseaseFeature.csv'), header=None).iloc[:, 1:].to_numpy()
+    data['proteinfeature'] = pd.read_csv(os.path.join(data_dir, 'Protein_ESM.csv'), header=None).iloc[:, 1:].to_numpy()
     data['protein_number']= data['proteinfeature'].shape[0]
 
     return data
