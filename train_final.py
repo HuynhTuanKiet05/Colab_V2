@@ -103,6 +103,11 @@ def update_ema(ema_state, model_state, decay):
     return ema_state
 
 
+def normalize_prior_matrix(matrix):
+    matrix = matrix - matrix.min()
+    return matrix / matrix.max().clamp_min(1e-6)
+
+
 def weighted_classification_loss(logits, targets, class_weights, focal_criterion, label_smoothing, hard_negative_weight, use_focal):
     probs = fn.softmax(logits.detach(), dim=-1)[:, 1]
     sample_weights = torch.ones_like(probs)
@@ -165,15 +170,30 @@ def build_path_prior(data, train_positive_edges, args):
         dipr[dipr_idx[:, 1], dipr_idx[:, 0]] = 1.0
 
     shared_paths = drpr @ dipr
-    shared_norm = shared_paths / shared_paths.max().clamp_min(1.0)
+    shared_norm = normalize_prior_matrix(shared_paths)
 
     drug_deg = drpr.sum(dim=1, keepdim=True)
     disease_deg = dipr.sum(dim=0, keepdim=True)
     degree_mix = torch.sqrt((drug_deg + 1.0) * (disease_deg + 1.0))
-    degree_norm = degree_mix / degree_mix.max().clamp_min(1.0)
+    degree_norm = normalize_prior_matrix(degree_mix)
 
-    combined_prior = 0.55 * shared_norm + 0.3 * train_drdi + 0.15 * degree_norm
-    return combined_prior
+    # Collaborative prior: a drug gets support from drugs similar to those
+    # already linked with the target disease, and vice versa for diseases.
+    drug_similarity = torch.as_tensor(data['drs'], dtype=torch.float32)
+    disease_similarity = torch.as_tensor(data['dis'], dtype=torch.float32)
+    drug_similarity.fill_diagonal_(0.0)
+    disease_similarity.fill_diagonal_(0.0)
+
+    disease_pos_counts = train_drdi.sum(dim=0, keepdim=True).clamp_min(1.0)
+    drug_pos_counts = train_drdi.sum(dim=1, keepdim=True).clamp_min(1.0)
+    drug_support = (drug_similarity @ train_drdi) / disease_pos_counts
+    disease_support = (train_drdi @ disease_similarity) / drug_pos_counts
+    collab_norm = normalize_prior_matrix(0.5 * (drug_support + disease_support))
+
+    # Do not inject the direct train association itself; that hurts
+    # generalization because test positives are unseen by design.
+    combined_prior = 0.45 * shared_norm + 0.40 * collab_norm + 0.15 * degree_norm
+    return normalize_prior_matrix(combined_prior)
 
 
 def gather_pair_bias(pair_index, prior_matrix, device, scale=0.22):
@@ -200,7 +220,6 @@ def hard_negative_mining_loss(logits, targets, top_ratio=0.15, margin=0.12):
 
 def phase_weights(epoch, args):
     progress = (epoch + 1) / max(1, args.epochs)
-    warmup_ratio = min(1.0, (epoch + 1) / max(1, args.warmup_epochs))
     # Keep the first phase classification-only to prevent early loss spikes.
     if epoch + 1 <= args.warmup_epochs:
         return {
@@ -212,7 +231,7 @@ def phase_weights(epoch, args):
         }
     ramp = min(1.0, (progress - (args.warmup_epochs / max(1, args.epochs))) / 0.35)
     ranking = args.ranking_weight * (0.15 + 0.85 * ramp)
-    contrastive = args.contrastive_weight * max(0.1, 1.0 - 0.85 * ramp)
+    contrastive = args.contrastive_weight * max(0.0, (1.0 - ramp) ** 2)
     hard_neg = 0.02 + 0.10 * ramp
     hard_neg_scale = 1.0 + 0.18 * ramp
     if progress < 0.75:
@@ -281,12 +300,13 @@ if __name__ == '__main__':
     parser.add_argument('--log_every', default=25, type=int, help='print training loss every N epochs')
     parser.add_argument('--focal_gamma', default=1.2, type=float, help='focal loss gamma during early training')
     parser.add_argument('--focal_gamma_warm', default=2.0, type=float, help='focal loss gamma during late training')
-    parser.add_argument('--contrastive_weight', default=0.08, type=float, help='weight of node-level cross-view contrastive loss')
+    parser.add_argument('--contrastive_weight', default=0.03, type=float, help='weight of node-level cross-view contrastive loss')
     parser.add_argument('--contrastive_temperature', default=0.2, type=float, help='temperature for contrastive loss')
     parser.add_argument('--ranking_weight', default=0.12, type=float, help='weight of pairwise ranking loss')
     parser.add_argument('--ranking_margin', default=0.2, type=float, help='margin used in ranking loss')
     parser.add_argument('--ranking_samples', default=2048, type=int, help='maximum positive-negative pairs used in ranking loss')
     parser.add_argument('--hard_negative_weight', default=2.0, type=float, help='reweight difficult negatives based on current positive score')
+    parser.add_argument('--path_bias_scale', default=0.30, type=float, help='strength of the indirect topology prior used at train and eval time')
     parser.add_argument('--label_smoothing', default=0.01, type=float, help='label smoothing for cross entropy')
     parser.add_argument('--patience', default=150, type=int, help='early stopping patience in epochs without AUC improvement')
     parser.add_argument('--target_auc', default=0.96, type=float, help=argparse.SUPPRESS)
@@ -383,7 +403,7 @@ if __name__ == '__main__':
             model.train()
             phase = phase_weights(epoch, args)
             train_edge_stats = {
-                'pair_bias': edge_stats['pair_bias'] + gather_pair_bias(X_train, path_prior, device, scale=0.45)
+                'pair_bias': gather_pair_bias(X_train, path_prior, device, scale=args.path_bias_scale)
             }
             _, train_score, aux_losses = model(
                 drug_view_graphs,
@@ -430,6 +450,9 @@ if __name__ == '__main__':
 
             should_score = (epoch + 1) >= args.eval_start_epoch and ((epoch + 1 - args.eval_start_epoch) % max(1, args.score_every) == 0)
             if should_score:
+                test_edge_stats = {
+                    'pair_bias': gather_pair_bias(X_test, path_prior, device, scale=args.path_bias_scale)
+                }
                 eval_state = ema_state_dict if ema_state_dict is not None else None
                 backup_state = None
                 if eval_state is not None:
@@ -445,7 +468,7 @@ if __name__ == '__main__':
                         disease_feature,
                         protein_feature,
                         X_test,
-                        edge_stats=None,
+                        edge_stats=test_edge_stats,
                     )
                 if backup_state is not None:
                     model.load_state_dict(backup_state, strict=False)
@@ -478,6 +501,9 @@ if __name__ == '__main__':
                     break
 
         if best_metrics is None:
+            test_edge_stats = {
+                'pair_bias': gather_pair_bias(X_test, path_prior, device, scale=args.path_bias_scale)
+            }
             eval_state = ema_state_dict if ema_state_dict is not None else None
             backup_state = None
             if eval_state is not None:
@@ -493,6 +519,7 @@ if __name__ == '__main__':
                     disease_feature,
                     protein_feature,
                     X_test,
+                    edge_stats=test_edge_stats,
                 )
             if backup_state is not None:
                 model.load_state_dict(backup_state, strict=False)

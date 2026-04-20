@@ -228,9 +228,14 @@ class AMNTDDA(nn.Module):
     def _contrastive_loss(self, lhs, rhs):
         lhs = F.normalize(lhs, dim=-1)
         rhs = F.normalize(rhs, dim=-1)
-        logits = lhs @ rhs.t() / self.contrastive_temperature
-        labels = torch.arange(lhs.shape[0], device=lhs.device)
-        return 0.5 * (F.cross_entropy(logits, labels) + F.cross_entropy(logits.t(), labels))
+        # The original InfoNCE-style objective stayed around ~10-12 for this
+        # dataset, so it kept dominating late training even with a small weight.
+        # A lighter alignment loss keeps the multi-view regularization useful
+        # without drowning the ranking/classification objective on harder folds.
+        cosine_alignment = 1.0 - (lhs * rhs).sum(dim=-1)
+        lhs_spread = torch.relu(0.15 - lhs.std(dim=0)).mean()
+        rhs_spread = torch.relu(0.15 - rhs.std(dim=0)).mean()
+        return cosine_alignment.mean() + 0.1 * (lhs_spread + rhs_spread)
 
     def forward(self, drdr_graph, didi_graph, drdipr_graph, drug_feature, disease_feature, protein_feature, sample, edge_stats=None, return_aux=False):
         drug_views = self._encode_similarity_views(drdr_graph, self.drug_view_encoders)
