@@ -197,7 +197,10 @@ Day la huong tham khao tu do an ban cua ban: giu backbone AMDGT, bo sung topolog
   --temperature 0.5 \
   --topo_hidden 128 \
   --gate_mode vector \
-  --gate_bias_init -2.0
+  --gate_bias_init -2.0 \
+  --label_smoothing 0.01 \
+  --grad_clip 5.0 \
+  --ema_decay 0.995
 ```
 
 Ket qua full 10-fold se duoc ghi ra:
@@ -286,7 +289,10 @@ Neu muon chay rieng fold yeu theo huong TMC-RVG:
   --temperature 0.5 \
   --topo_hidden 128 \
   --gate_mode vector \
-  --gate_bias_init -2.0
+  --gate_bias_init -2.0 \
+  --label_smoothing 0.01 \
+  --grad_clip 5.0 \
+  --ema_decay 0.995
 ```
 
 ## 7. Luu ket qua len Google Drive

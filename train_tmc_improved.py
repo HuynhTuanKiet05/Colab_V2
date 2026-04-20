@@ -49,6 +49,17 @@ def set_seed(seed):
         torch.backends.cudnn.benchmark = False
 
 
+def update_ema(ema_state, model_state, decay):
+    if ema_state is None:
+        return {key: value.detach().cpu().clone() for key, value in model_state.items()}
+    for key, value in model_state.items():
+        if torch.is_floating_point(value):
+            ema_state[key].mul_(decay).add_(value.detach().cpu(), alpha=1.0 - decay)
+        else:
+            ema_state[key] = value.detach().cpu().clone()
+    return ema_state
+
+
 def build_results_dataframe(fold_metrics, fold_ids=None):
     columns = ['Fold', 'Best_Epoch', 'AUC', 'AUPR', 'Accuracy', 'Precision', 'Recall', 'F1-score', 'Mcc']
     if fold_ids is None:
@@ -117,6 +128,9 @@ if __name__ == '__main__':
     parser.add_argument('--topo_hidden', type=int, default=128)
     parser.add_argument('--gate_mode', choices=['scalar', 'vector'], default='vector')
     parser.add_argument('--gate_bias_init', type=float, default=-2.0)
+    parser.add_argument('--label_smoothing', type=float, default=0.01)
+    parser.add_argument('--grad_clip', type=float, default=5.0)
+    parser.add_argument('--ema_decay', type=float, default=0.995)
 
     args = parser.parse_args()
     apply_dataset_preset(args)
@@ -165,7 +179,7 @@ if __name__ == '__main__':
 
     aucs, auprs, accs, precs, recs, f1s, mccs, epochs = [], [], [], [], [], [], [], []
     global_start = timeit.default_timer()
-    cross_entropy = nn.CrossEntropyLoss()
+    cross_entropy = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
 
     for fold_idx in selected_folds:
         print(f'\n--- Fold: {fold_idx} ---')
@@ -184,6 +198,7 @@ if __name__ == '__main__':
         drdipr_graph = drdipr_graph.to(args.device)
 
         best_metrics = None
+        ema_state_dict = None
 
         for epoch in range(args.epochs):
             model.train()
@@ -203,11 +218,17 @@ if __name__ == '__main__':
 
             optimizer.zero_grad()
             train_loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
             optimizer.step()
+            ema_state_dict = update_ema(ema_state_dict, model.state_dict(), args.ema_decay)
 
             if (epoch + 1) % max(1, args.score_every) != 0:
                 continue
 
+            backup_state = None
+            if ema_state_dict is not None:
+                backup_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+                model.load_state_dict(ema_state_dict, strict=False)
             model.eval()
             with torch.no_grad():
                 _, test_score, _ = model(
@@ -221,6 +242,8 @@ if __name__ == '__main__':
                     disease_topo_feat,
                     x_test,
                 )
+            if backup_state is not None:
+                model.load_state_dict(backup_state, strict=False)
 
             test_prob = fn.softmax(test_score, dim=-1)[:, 1].cpu().numpy()
             test_pred = torch.argmax(test_score, dim=-1).cpu().numpy()
@@ -255,7 +278,8 @@ if __name__ == '__main__':
             if best_metrics is None or auc > best_metrics[0]:
                 best_metrics = (auc, aupr, accuracy, precision, recall, f1, mcc, epoch + 1)
                 if args.save_checkpoints:
-                    torch.save(model.state_dict(), os.path.join(args.result_dir, f'best_model_fold_{fold_idx}.pth'))
+                    state_to_save = ema_state_dict if ema_state_dict is not None else model.state_dict()
+                    torch.save(state_to_save, os.path.join(args.result_dir, f'best_model_fold_{fold_idx}.pth'))
 
         if best_metrics is None:
             raise RuntimeError(f'No evaluation executed for fold {fold_idx}; check score_every/epochs.')
