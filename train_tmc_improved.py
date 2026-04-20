@@ -1,5 +1,6 @@
 import argparse
 import gc
+import math
 import os
 import random
 import timeit
@@ -11,7 +12,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as fn
 import torch.optim as optim
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from AMDGT_original.data_preprocess import (
     data_processing,
@@ -60,6 +60,94 @@ def update_ema(ema_state, model_state, decay):
     return ema_state
 
 
+def build_scheduler(optimizer, args):
+    warmup_epochs = max(1, min(args.lr_warmup_epochs, args.epochs))
+    min_scale = min(args.min_lr / max(args.lr, 1e-8), 1.0)
+
+    def lr_lambda(epoch_idx):
+        step = epoch_idx + 1
+        if step <= warmup_epochs:
+            return step / warmup_epochs
+        progress = (step - warmup_epochs) / max(1, args.epochs - warmup_epochs)
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_scale + (1.0 - min_scale) * cosine
+
+    return optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+
+
+def normalize_prior_matrix(matrix):
+    matrix = matrix - matrix.min()
+    return matrix / matrix.max().clamp_min(1e-6)
+
+
+def positive_training_edges(x_train, y_train):
+    labels = np.asarray(y_train).reshape(-1).astype(int)
+    return np.asarray(x_train)[labels == 1]
+
+
+def build_path_prior(data, train_positive_edges, args):
+    drug_n = args.drug_number
+    disease_n = args.disease_number
+    protein_n = args.protein_number
+
+    train_drdi = torch.zeros((drug_n, disease_n), dtype=torch.float32)
+    if len(train_positive_edges) > 0:
+        train_pairs = torch.as_tensor(train_positive_edges, dtype=torch.long)
+        train_drdi[train_pairs[:, 0], train_pairs[:, 1]] = 1.0
+
+    drpr = torch.zeros((drug_n, protein_n), dtype=torch.float32)
+    if data['drpr'].size > 0:
+        drpr_idx = torch.as_tensor(data['drpr'], dtype=torch.long)
+        drpr[drpr_idx[:, 0], drpr_idx[:, 1]] = 1.0
+
+    dipr = torch.zeros((protein_n, disease_n), dtype=torch.float32)
+    if data['dipr'].size > 0:
+        dipr_idx = torch.as_tensor(data['dipr'], dtype=torch.long)
+        dipr[dipr_idx[:, 1], dipr_idx[:, 0]] = 1.0
+
+    shared_paths = drpr @ dipr
+    shared_norm = normalize_prior_matrix(shared_paths)
+
+    drug_deg = drpr.sum(dim=1, keepdim=True)
+    disease_deg = dipr.sum(dim=0, keepdim=True)
+    degree_mix = torch.sqrt((drug_deg + 1.0) * (disease_deg + 1.0))
+    degree_norm = normalize_prior_matrix(degree_mix)
+
+    drug_similarity = torch.as_tensor(data['drs'], dtype=torch.float32)
+    disease_similarity = torch.as_tensor(data['dis'], dtype=torch.float32)
+    drug_similarity.fill_diagonal_(0.0)
+    disease_similarity.fill_diagonal_(0.0)
+
+    disease_pos_counts = train_drdi.sum(dim=0, keepdim=True).clamp_min(1.0)
+    drug_pos_counts = train_drdi.sum(dim=1, keepdim=True).clamp_min(1.0)
+    drug_support = (drug_similarity @ train_drdi) / disease_pos_counts
+    disease_support = (train_drdi @ disease_similarity) / drug_pos_counts
+    collab_norm = normalize_prior_matrix(0.5 * (drug_support + disease_support))
+
+    train_assoc_norm = normalize_prior_matrix(train_drdi) if train_drdi.max() > 0 else train_drdi
+    indirect_prior = normalize_prior_matrix(0.50 * shared_norm + 0.35 * collab_norm + 0.15 * degree_norm)
+    train_prior = normalize_prior_matrix(
+        (1.0 - args.direct_train_prior_weight) * indirect_prior + args.direct_train_prior_weight * train_assoc_norm
+    )
+    return indirect_prior, train_prior
+
+
+def gather_pair_bias(pair_index, prior_matrix, device, scale=0.22):
+    idx = pair_index.long().detach().cpu().clone()
+    idx[:, 0] = idx[:, 0].clamp(0, prior_matrix.shape[0] - 1)
+    idx[:, 1] = idx[:, 1].clamp(0, prior_matrix.shape[1] - 1)
+    bias = prior_matrix[idx[:, 0], idx[:, 1]].to(device)
+    return scale * bias.unsqueeze(-1)
+
+
+def contrastive_weight_for_epoch(epoch, args):
+    if epoch + 1 <= args.cl_warmup_epochs:
+        return args.lambda_cl
+    progress = (epoch + 1 - args.cl_warmup_epochs) / max(1, args.epochs - args.cl_warmup_epochs)
+    decay = (1.0 - min(max(progress, 0.0), 1.0)) ** 2
+    return args.lambda_cl * (args.cl_min_scale + (1.0 - args.cl_min_scale) * decay)
+
+
 def build_results_dataframe(fold_metrics, fold_ids=None):
     columns = ['Fold', 'Best_Epoch', 'AUC', 'AUPR', 'Accuracy', 'Precision', 'Recall', 'F1-score', 'Mcc']
     if fold_ids is None:
@@ -101,6 +189,8 @@ if __name__ == '__main__':
     parser.add_argument('--fold_indices', nargs='+', type=int, default=None)
     parser.add_argument('--epochs', type=int, default=1000)
     parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--min_lr', type=float, default=1e-6)
+    parser.add_argument('--lr_warmup_epochs', type=int, default=40)
     parser.add_argument('--weight_decay', type=float, default=1e-3)
     parser.add_argument('--random_seed', type=int, default=1234)
     parser.add_argument('--neighbor', type=int, default=None)
@@ -124,16 +214,24 @@ if __name__ == '__main__':
     parser.add_argument('--save_checkpoints', action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument('--disable_scheduler', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--lambda_cl', type=float, default=0.1)
+    parser.add_argument('--cl_warmup_epochs', type=int, default=200)
+    parser.add_argument('--cl_min_scale', type=float, default=0.2)
     parser.add_argument('--temperature', type=float, default=0.5)
     parser.add_argument('--topo_hidden', type=int, default=128)
     parser.add_argument('--gate_mode', choices=['scalar', 'vector'], default='vector')
     parser.add_argument('--gate_bias_init', type=float, default=-2.0)
+    parser.add_argument('--pair_decoder', choices=['hybrid_mlp', 'elementwise'], default='hybrid_mlp')
+    parser.add_argument('--path_bias_scale', type=float, default=0.18)
+    parser.add_argument('--direct_train_prior_weight', type=float, default=0.18)
+    parser.add_argument('--eval_path_bias', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--label_smoothing', type=float, default=0.01)
     parser.add_argument('--grad_clip', type=float, default=5.0)
     parser.add_argument('--ema_decay', type=float, default=0.995)
 
     args = parser.parse_args()
     apply_dataset_preset(args)
+    args.direct_train_prior_weight = min(max(args.direct_train_prior_weight, 0.0), 1.0)
+    args.cl_min_scale = min(max(args.cl_min_scale, 0.0), 1.0)
     args.topo_feat_dim = 7
     args.device = resolve_device(args.device)
     set_seed(args.random_seed)
@@ -179,29 +277,39 @@ if __name__ == '__main__':
 
     aucs, auprs, accs, precs, recs, f1s, mccs, epochs = [], [], [], [], [], [], [], []
     global_start = timeit.default_timer()
-    cross_entropy = nn.CrossEntropyLoss(label_smoothing=args.label_smoothing)
 
     for fold_idx in selected_folds:
         print(f'\n--- Fold: {fold_idx} ---')
         model = TMC_AMDGT_RVG(args).to(args.device)
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-        scheduler = None if args.disable_scheduler else ReduceLROnPlateau(
-            optimizer, mode='max', factor=0.5, patience=30, min_lr=1e-6
-        )
+        scheduler = None if args.disable_scheduler else build_scheduler(optimizer, args)
 
         x_train = torch.LongTensor(data['X_train'][fold_idx]).to(args.device)
         y_train = torch.LongTensor(data['Y_train'][fold_idx]).to(args.device).flatten()
         x_test = torch.LongTensor(data['X_test'][fold_idx]).to(args.device)
         y_test = data['Y_test'][fold_idx].flatten()
 
+        n_pos = torch.sum(y_train).item()
+        n_neg = y_train.numel() - n_pos
+        class_weights = torch.tensor([1.0, max(n_neg / max(n_pos, 1.0), 1.0)], device=args.device)
+        cross_entropy = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=args.label_smoothing)
+
         drdipr_graph, data = dgl_heterograph(data, data['X_train'][fold_idx], args)
         drdipr_graph = drdipr_graph.to(args.device)
+        train_positive_edges = positive_training_edges(data['X_train'][fold_idx], data['Y_train'][fold_idx])
+        eval_prior, train_prior = build_path_prior(data, train_positive_edges, args)
+        eval_prior = eval_prior.to(args.device)
+        train_prior = train_prior.to(args.device)
 
         best_metrics = None
         ema_state_dict = None
 
         for epoch in range(args.epochs):
             model.train()
+            cl_weight = contrastive_weight_for_epoch(epoch, args)
+            train_edge_stats = {
+                'pair_bias': gather_pair_bias(x_train, train_prior, args.device, scale=args.path_bias_scale)
+            }
             _, train_score, cl_loss = model(
                 drdr_graph,
                 didi_graph,
@@ -212,14 +320,17 @@ if __name__ == '__main__':
                 drug_topo_feat,
                 disease_topo_feat,
                 x_train,
+                edge_stats=train_edge_stats,
             )
             ce_loss = cross_entropy(train_score, y_train)
-            train_loss = ce_loss + args.lambda_cl * cl_loss
+            train_loss = ce_loss + cl_weight * cl_loss
 
             optimizer.zero_grad()
             train_loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip)
             optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
             ema_state_dict = update_ema(ema_state_dict, model.state_dict(), args.ema_decay)
 
             if (epoch + 1) % max(1, args.score_every) != 0:
@@ -230,6 +341,11 @@ if __name__ == '__main__':
                 backup_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
                 model.load_state_dict(ema_state_dict, strict=False)
             model.eval()
+            eval_edge_stats = None
+            if args.eval_path_bias:
+                eval_edge_stats = {
+                    'pair_bias': gather_pair_bias(x_test, eval_prior, args.device, scale=args.path_bias_scale)
+                }
             with torch.no_grad():
                 _, test_score, _ = model(
                     drdr_graph,
@@ -241,6 +357,7 @@ if __name__ == '__main__':
                     drug_topo_feat,
                     disease_topo_feat,
                     x_test,
+                    edge_stats=eval_edge_stats,
                 )
             if backup_state is not None:
                 model.load_state_dict(backup_state, strict=False)
@@ -249,8 +366,6 @@ if __name__ == '__main__':
             test_pred = torch.argmax(test_score, dim=-1).cpu().numpy()
             auc, aupr, accuracy, precision, recall, f1, mcc = get_metric(y_test, test_pred, test_prob)
 
-            if scheduler is not None:
-                scheduler.step(auc)
             elapsed = timeit.default_timer() - global_start
             print(
                 '\t\t'.join(

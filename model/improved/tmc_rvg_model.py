@@ -81,6 +81,39 @@ class FuzzyGate(nn.Module):
         return base_repr + gate * topo_proj
 
 
+class HybridPairDecoder(nn.Module):
+    def __init__(self, dim, dropout=0.2):
+        super().__init__()
+        hidden = max(dim * 2, 256)
+        compact = max(dim, 128)
+        self.bilinear = nn.Bilinear(dim, dim, 2)
+        self.skip = nn.Linear(dim, 2)
+        self.decoder = nn.Sequential(
+            nn.LayerNorm(dim * 4 + 3),
+            nn.Linear(dim * 4 + 3, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, compact),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(compact, 2),
+        )
+
+    def forward(self, drug_repr, disease_repr, topology_score=None, pair_bias=None):
+        pair_mul = drug_repr * disease_repr
+        pair_diff = torch.abs(drug_repr - disease_repr)
+        pair_sum = drug_repr + disease_repr
+        pair_sqdiff = (drug_repr - disease_repr) ** 2
+        pair_dot = (drug_repr * disease_repr).sum(dim=-1, keepdim=True)
+        pair_cos = fn.cosine_similarity(drug_repr, disease_repr, dim=-1).unsqueeze(-1)
+        if topology_score is None:
+            topology_score = torch.zeros_like(pair_dot)
+        if pair_bias is not None:
+            topology_score = topology_score + pair_bias
+        features = torch.cat([pair_mul, pair_diff, pair_sum, pair_sqdiff, pair_dot, pair_cos, topology_score], dim=-1)
+        return self.bilinear(drug_repr, disease_repr) + self.skip(pair_mul) + self.decoder(features)
+
+
 class TMC_AMDGT_RVG(nn.Module):
     def __init__(self, args):
         super().__init__()
@@ -131,7 +164,13 @@ class TMC_AMDGT_RVG(nn.Module):
             self.hgt_layers.append(self.hgt_shared)
         self.hgt_layers.append(self.hgt_last)
 
-        encoder_layer = nn.TransformerEncoderLayer(d_model=args.gt_out_dim, nhead=args.tr_head)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=args.gt_out_dim,
+            nhead=args.tr_head,
+            dropout=args.dropout,
+            activation='gelu',
+            batch_first=True,
+        )
         self.drug_trans = nn.TransformerEncoder(encoder_layer, num_layers=args.tr_layer)
         self.disease_trans = nn.TransformerEncoder(encoder_layer, num_layers=args.tr_layer)
 
@@ -165,7 +204,7 @@ class TMC_AMDGT_RVG(nn.Module):
 
         self.contrastive_loss = MultiViewContrastiveLoss(temperature=args.temperature)
 
-        self.mlp = nn.Sequential(
+        self.elementwise_mlp = nn.Sequential(
             nn.Linear(base_dim, 1024),
             nn.ReLU(),
             nn.Dropout(0.4),
@@ -177,6 +216,15 @@ class TMC_AMDGT_RVG(nn.Module):
             nn.Dropout(0.4),
             nn.Linear(256, 2),
         )
+        self.pair_decoder = getattr(args, 'pair_decoder', 'hybrid_mlp')
+        self.hybrid_pair_decoder = HybridPairDecoder(base_dim, dropout=args.dropout)
+        self.pair_topology = nn.Sequential(
+            nn.Linear(base_dim * 2, base_dim),
+            nn.GELU(),
+            nn.Dropout(args.dropout),
+            nn.Linear(base_dim, 1),
+        )
+        self.topology_scale = nn.Parameter(torch.tensor(0.20))
 
     def _association_views(self, drdipr_graph, drug_feature, disease_feature, protein_feature):
         drug_feature = self.drug_linear(drug_feature)
@@ -210,13 +258,14 @@ class TMC_AMDGT_RVG(nn.Module):
         drug_topo_feat,
         disease_topo_feat,
         sample,
+        edge_stats=None,
     ):
         drug_sim = self.gt_drug(drdr_graph)
         disease_sim = self.gt_disease(didi_graph)
         drug_assoc, disease_assoc = self._association_views(drdipr_graph, drug_feature, disease_feature, protein_feature)
 
-        drug_base = self.drug_trans(torch.stack((drug_sim, drug_assoc), dim=1)).view(self.args.drug_number, -1)
-        disease_base = self.disease_trans(torch.stack((disease_sim, disease_assoc), dim=1)).view(self.args.disease_number, -1)
+        drug_base = self.drug_trans(torch.stack((drug_sim, drug_assoc), dim=1)).reshape(self.args.drug_number, -1)
+        disease_base = self.disease_trans(torch.stack((disease_sim, disease_assoc), dim=1)).reshape(self.args.disease_number, -1)
 
         drug_topology = self.drug_topology_encoder(drug_topo_feat)
         disease_topology = self.disease_topology_encoder(disease_topo_feat)
@@ -228,7 +277,19 @@ class TMC_AMDGT_RVG(nn.Module):
         drug_repr = self.drug_gate(drug_base, drug_topology)
         disease_repr = self.disease_gate(disease_base, disease_topology)
 
-        pair_embedding = torch.mul(drug_repr[sample[:, 0]], disease_repr[sample[:, 1]])
-        output = self.mlp(pair_embedding)
+        pair_drug = drug_repr[sample[:, 0]]
+        pair_disease = disease_repr[sample[:, 1]]
+        topology_score = self.topology_scale * torch.tanh(self.pair_topology(torch.cat([pair_drug, pair_disease], dim=-1)))
+        pair_bias = None
+        if edge_stats is not None:
+            pair_bias = edge_stats.get('pair_bias')
+
+        if self.pair_decoder == 'elementwise':
+            pair_embedding = torch.mul(pair_drug, pair_disease)
+            output = self.elementwise_mlp(pair_embedding)
+            if pair_bias is not None:
+                output = output + torch.cat([torch.zeros_like(pair_bias), pair_bias], dim=-1)
+        else:
+            output = self.hybrid_pair_decoder(pair_drug, pair_disease, topology_score=topology_score, pair_bias=pair_bias)
 
         return drug_repr, output, contrastive

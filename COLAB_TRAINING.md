@@ -183,6 +183,8 @@ Day la huong tham khao tu do an ban cua ban: giu backbone AMDGT, bo sung topolog
   --k_fold 10 \
   --neighbor 5 \
   --lr 0.0001 \
+  --min_lr 0.000001 \
+  --lr_warmup_epochs 40 \
   --weight_decay 0.001 \
   --gt_out_dim 256 \
   --hgt_in_dim 256 \
@@ -194,10 +196,16 @@ Day la huong tham khao tu do an ban cua ban: giu backbone AMDGT, bo sung topolog
   --tr_layer 2 \
   --tr_head 4 \
   --lambda_cl 0.1 \
+  --cl_warmup_epochs 200 \
+  --cl_min_scale 0.2 \
   --temperature 0.5 \
   --topo_hidden 128 \
   --gate_mode vector \
   --gate_bias_init -2.0 \
+  --pair_decoder hybrid_mlp \
+  --path_bias_scale 0.18 \
+  --direct_train_prior_weight 0.18 \
+  --no-eval_path_bias \
   --label_smoothing 0.01 \
   --grad_clip 5.0 \
   --ema_decay 0.995
@@ -275,6 +283,8 @@ Neu muon chay rieng fold yeu theo huong TMC-RVG:
   --epochs 1000 \
   --neighbor 5 \
   --lr 0.0001 \
+  --min_lr 0.000001 \
+  --lr_warmup_epochs 40 \
   --weight_decay 0.001 \
   --gt_out_dim 256 \
   --hgt_in_dim 256 \
@@ -286,10 +296,16 @@ Neu muon chay rieng fold yeu theo huong TMC-RVG:
   --tr_layer 2 \
   --tr_head 4 \
   --lambda_cl 0.1 \
+  --cl_warmup_epochs 200 \
+  --cl_min_scale 0.2 \
   --temperature 0.5 \
   --topo_hidden 128 \
   --gate_mode vector \
   --gate_bias_init -2.0 \
+  --pair_decoder hybrid_mlp \
+  --path_bias_scale 0.18 \
+  --direct_train_prior_weight 0.18 \
+  --no-eval_path_bias \
   --label_smoothing 0.01 \
   --grad_clip 5.0 \
   --ema_decay 0.995
