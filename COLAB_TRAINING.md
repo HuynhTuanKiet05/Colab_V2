@@ -170,6 +170,40 @@ Ket qua full 10-fold se duoc ghi ra:
 
 - `Result/improved/C-dataset/10_fold_results_improved.csv`
 
+## 5B. Lenh train theo huong TMC-AMDGT-RVG
+
+Day la huong tham khao tu do an ban cua ban: giu backbone AMDGT, bo sung topology qua gated residual.
+
+```python
+%cd /content/Colab_V2
+!python train_tmc_improved.py \
+  --dataset C-dataset \
+  --device cuda \
+  --epochs 1000 \
+  --k_fold 10 \
+  --neighbor 5 \
+  --lr 0.0001 \
+  --weight_decay 0.001 \
+  --gt_out_dim 256 \
+  --hgt_in_dim 256 \
+  --hgt_head_dim 32 \
+  --hgt_layer 2 \
+  --hgt_head 8 \
+  --gt_layer 2 \
+  --gt_head 2 \
+  --tr_layer 2 \
+  --tr_head 4 \
+  --lambda_cl 0.1 \
+  --temperature 0.5 \
+  --topo_hidden 128 \
+  --gate_mode vector \
+  --gate_bias_init -2.0
+```
+
+Ket qua full 10-fold se duoc ghi ra:
+
+- `Result/tmc_improved/C-dataset/10_fold_results_tmc_improved.csv`
+
 ## 6. Chay rieng cac fold yeu de tune nhanh
 
 Repo hien tai da ho tro `--fold_indices`.
@@ -225,6 +259,35 @@ Luu y:
 - `Mean` va `Std` trong file subset chi tinh tren cac fold duoc chon
 - khong dung file subset de bao cao ket qua chinh thuc 10-fold
 - no chi dung de tuning nhanh
+
+Neu muon chay rieng fold yeu theo huong TMC-RVG:
+
+```python
+%cd /content/Colab_V2
+!python train_tmc_improved.py \
+  --dataset C-dataset \
+  --device cuda \
+  --k_fold 10 \
+  --fold_indices 1 2 4 8 \
+  --epochs 1000 \
+  --neighbor 5 \
+  --lr 0.0001 \
+  --weight_decay 0.001 \
+  --gt_out_dim 256 \
+  --hgt_in_dim 256 \
+  --hgt_head_dim 32 \
+  --hgt_layer 2 \
+  --hgt_head 8 \
+  --gt_layer 2 \
+  --gt_head 2 \
+  --tr_layer 2 \
+  --tr_head 4 \
+  --lambda_cl 0.1 \
+  --temperature 0.5 \
+  --topo_hidden 128 \
+  --gate_mode vector \
+  --gate_bias_init -2.0
+```
 
 ## 7. Luu ket qua len Google Drive
 
