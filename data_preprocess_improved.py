@@ -1,155 +1,34 @@
-import numpy as np
-import random
 import os
-import torch
-import pandas as pd
 import dgl
 import networkx as nx
-from sklearn.model_selection import StratifiedKFold
+import numpy as np
+import torch
+
+from AMDGT_original.data_preprocess import data_processing as original_data_processing
+from AMDGT_original.data_preprocess import dgl_similarity_graph as original_dgl_similarity_graph
+from AMDGT_original.data_preprocess import get_adj
+from AMDGT_original.data_preprocess import get_data as original_get_data
+from AMDGT_original.data_preprocess import k_fold as original_k_fold
+from AMDGT_original.data_preprocess import k_matrix
 
 device = torch.device(os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu'))
 
-def get_adj(edges, size):
-    edges_tensor = torch.LongTensor(edges).t()
-    values = torch.ones(len(edges))
-    adj = torch.sparse.LongTensor(edges_tensor, values, size).to_dense().long()
-    return adj
-
-
-def k_matrix(matrix, k):
-    num = matrix.shape[0]
-    knn_graph = np.zeros(matrix.shape)
-    idx_sort = np.argsort(-(matrix - np.eye(num)), axis=1)
-    for i in range(num):
-        knn_graph[i, idx_sort[i, :k + 1]] = matrix[i, idx_sort[i, :k + 1]]
-        knn_graph[idx_sort[i, :k + 1], i] = matrix[idx_sort[i, :k + 1], i]
-    return knn_graph + np.eye(num)
-
-
 def get_data(args):
-    data = dict()
-    data_dir = args.data_dir
-
-    drf = pd.read_csv(os.path.join(data_dir, 'DrugFingerprint.csv')).iloc[:, 1:].to_numpy()
-    drg = pd.read_csv(os.path.join(data_dir, 'DrugGIP.csv')).iloc[:, 1:].to_numpy()
-
-    dip = pd.read_csv(os.path.join(data_dir, 'DiseasePS.csv')).iloc[:, 1:].to_numpy()
-    dig = pd.read_csv(os.path.join(data_dir, 'DiseaseGIP.csv')).iloc[:, 1:].to_numpy()
-
-    data['drug_number'] = int(drf.shape[0])
-    data['disease_number'] = int(dig.shape[0])
-
-    data['drf'] = drf
-    data['drg'] = drg
-    data['dip'] = dip
-    data['dig'] = dig
-
-    data['drdi'] = pd.read_csv(os.path.join(data_dir, 'DrugDiseaseAssociationNumber.csv'), dtype=int).to_numpy()
-    data['drpr'] = pd.read_csv(os.path.join(data_dir, 'DrugProteinAssociationNumber.csv'), dtype=int).to_numpy()
-    data['dipr'] = pd.read_csv(os.path.join(data_dir, 'ProteinDiseaseAssociationNumber.csv'), dtype=int).to_numpy()
-
-    data['drugfeature'] = pd.read_csv(os.path.join(data_dir, 'Drug_mol2vec.csv'), header=None).iloc[:, 1:].to_numpy()
-    data['diseasefeature'] = pd.read_csv(os.path.join(data_dir, 'DiseaseFeature.csv'), header=None).iloc[:, 1:].to_numpy()
-    data['proteinfeature'] = pd.read_csv(os.path.join(data_dir, 'Protein_ESM.csv'), header=None).iloc[:, 1:].to_numpy()
-    data['protein_number']= data['proteinfeature'].shape[0]
-
-    return data
+    return original_get_data(args)
 
 
 def data_processing(data, args):
-    drdi_matrix = get_adj(data['drdi'], (args.drug_number, args.disease_number))
-    one_index = []
-    zero_index = []
-    for i in range(drdi_matrix.shape[0]):
-        for j in range(drdi_matrix.shape[1]):
-            if drdi_matrix[i][j] >= 1:
-                one_index.append([i, j])
-            else:
-                zero_index.append([i, j])
-    random.seed(args.random_seed)
-    random.shuffle(one_index)
-    random.shuffle(zero_index)
-
-    unsamples = zero_index[int(args.negative_rate * len(one_index)):]
-    data['unsample'] = np.array(unsamples)
-
-    zero_index = zero_index[:int(args.negative_rate * len(one_index))]
-
-    index = np.array(one_index + zero_index, dtype=int)
-    label = np.array([1] * len(one_index) + [0] * len(zero_index), dtype=int)
-    samples = np.concatenate((index, np.expand_dims(label, axis=1)), axis=1)
-    label_p = np.array([1] * len(one_index), dtype=int)
-
-    drdi_p = samples[samples[:, 2] == 1, :]
-    drdi_n = samples[samples[:, 2] == 0, :]
-
-    drs_mean = (data['drf'] + data['drg']) / 2
-    dis_mean = (data['dip'] + data['dig']) / 2
-
-    drs = np.where(data['drf'] == 0, data['drg'], drs_mean)
-    dis = np.where(data['dip'] == 0, data['dig'], dis_mean)
-
-    data['drs'] = drs
-    data['dis'] = dis
-    data['all_samples'] = samples
-    data['all_drdi'] = samples[:, :2]
-    data['all_drdi_p'] = drdi_p
-    data['all_drdi_n'] = drdi_n
-    data['all_label'] = label
-    data['all_label_p'] = label_p
-
-    return data
+    return original_data_processing(data, args)
 
 
 def k_fold(data, args):
-    k = args.k_fold
-    skf = StratifiedKFold(n_splits=k, random_state=args.random_seed, shuffle=True)
-    X = data['all_drdi']
-    Y = data['all_label']
-    # n = skf.get_n_splits(X, Y)
-    X_train_all, X_test_all, Y_train_all, Y_test_all = [], [], [], []
-    for train_index, test_index in skf.split(X, Y):
-        # print('Train:', train_index, 'Test:', test_index)
-        X_train, X_test = X[train_index], X[test_index]
-        Y_train, Y_test = Y[train_index], Y[test_index]
-        Y_train = np.expand_dims(Y_train, axis=1).astype('float64')
-        Y_test = np.expand_dims(Y_test, axis=1).astype('float64')
-        X_train_all.append(X_train)
-        X_test_all.append(X_test)
-        Y_train_all.append(Y_train)
-        Y_test_all.append(Y_test)
-
-    for i in range(k):
-        fold_dir = os.path.join(args.data_dir, 'fold', str(i))
-        os.makedirs(fold_dir, exist_ok=True)
-        X_train1 = pd.DataFrame(data=np.concatenate((X_train_all[i], Y_train_all[i]), axis=1), columns=['drug', 'disease', 'label'])
-        X_train1.to_csv(os.path.join(fold_dir, 'data_train.csv'))
-        X_test1 = pd.DataFrame(data=np.concatenate((X_test_all[i], Y_test_all[i]), axis=1), columns=['drug', 'disease', 'label'])
-        X_test1.to_csv(os.path.join(fold_dir, 'data_test.csv'))
-
-    data['X_train'] = X_train_all
-    data['X_test'] = X_test_all
-    data['Y_train'] = Y_train_all
-    data['Y_test'] = Y_test_all
-    return data
+    # Reuse the original split logic so baseline and improved runs share the
+    # exact same folds during 10-fold cross-validation.
+    return original_k_fold(data, args)
 
 
 def dgl_similarity_graph(data, args):
-    drdr_matrix = k_matrix(data['drs'], args.neighbor)
-    didi_matrix = k_matrix(data['dis'], args.neighbor)
-    if hasattr(nx, 'from_numpy_array'):
-        drdr_nx = nx.from_numpy_array(drdr_matrix)
-        didi_nx = nx.from_numpy_array(didi_matrix)
-    else:
-        drdr_nx = nx.from_numpy_matrix(drdr_matrix)
-        didi_nx = nx.from_numpy_matrix(didi_matrix)
-    drdr_graph = dgl.from_networkx(drdr_nx)
-    didi_graph = dgl.from_networkx(didi_nx)
-
-    drdr_graph.ndata['drs'] = torch.tensor(data['drs'])
-    didi_graph.ndata['dis'] = torch.tensor(data['dis'])
-
-    return drdr_graph, didi_graph, data
+    return original_dgl_similarity_graph(data, args)
 
 
 def _build_similarity_graph(matrix, feature_key, k):

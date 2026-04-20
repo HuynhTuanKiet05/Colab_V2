@@ -230,6 +230,34 @@ def phase_weights(epoch, args):
     }
 
 
+def build_results_dataframe(fold_metrics):
+    columns = ['Fold', 'Best_Epoch', 'AUC', 'AUPR', 'Accuracy', 'Precision', 'Recall', 'F1-score', 'Mcc']
+    metric_columns = columns[2:]
+    results_df = pd.DataFrame(
+        {
+            'Fold': [f'Fold {i}' for i in range(len(fold_metrics['AUC']))],
+            'Best_Epoch': fold_metrics['Best_Epoch'],
+            'AUC': fold_metrics['AUC'],
+            'AUPR': fold_metrics['AUPR'],
+            'Accuracy': fold_metrics['Accuracy'],
+            'Precision': fold_metrics['Precision'],
+            'Recall': fold_metrics['Recall'],
+            'F1-score': fold_metrics['F1-score'],
+            'Mcc': fold_metrics['Mcc'],
+        }
+    )
+
+    summary_rows = []
+    for label, reducer in (('Mean', np.mean), ('Std', np.std)):
+        row = {'Fold': label, 'Best_Epoch': ''}
+        for metric in metric_columns:
+            row[metric] = float(reducer(results_df[metric].to_numpy(dtype=np.float64)))
+        summary_rows.append(row)
+
+    summary_df = pd.DataFrame(summary_rows, columns=columns)
+    return pd.concat([results_df, summary_df], ignore_index=True)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--k_fold', type=int, default=10, help='k-fold cross validation')
@@ -492,24 +520,18 @@ if __name__ == '__main__':
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    results_df = pd.DataFrame({
-        'Fold': [f'Fold {i}' for i in range(len(AUCs))],
-        'Best_Epoch': Epochs,
-        'AUC': AUCs,
-        'AUPR': AUPRs,
-        'Accuracy': Accs,
-        'Precision': Precs,
-        'Recall': Recs,
-        'F1-score': F1s,
-        'Mcc': MCCs,
-    })
-
-    metrics_only = results_df.drop(columns=['Fold', 'Best_Epoch'])
-    summary_df = pd.DataFrame(
-        [['Mean', ''] + metrics_only.mean().tolist(), ['Std', ''] + metrics_only.std().tolist()],
-        columns=results_df.columns,
+    final_df = build_results_dataframe(
+        {
+            'Best_Epoch': Epochs,
+            'AUC': AUCs,
+            'AUPR': AUPRs,
+            'Accuracy': Accs,
+            'Precision': Precs,
+            'Recall': Recs,
+            'F1-score': F1s,
+            'Mcc': MCCs,
+        }
     )
-    final_df = pd.concat([results_df, summary_df], ignore_index=True)
 
     print('\n' + '=' * 30 + '\nFINAL RESULTS SUMMARY (IMPROVED PIPELINE)\n' + '=' * 30)
     print(final_df.iloc[-2:])
