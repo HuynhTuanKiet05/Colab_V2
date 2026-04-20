@@ -279,6 +279,10 @@ def phase_weights(epoch, args):
             'ranking': 0.0,
             'contrastive': 0.0,
             'hard_neg': 0.0,
+            'topology': 0.0,
+            'positive_reg': 0.0,
+            'attention_sparsity': 0.0,
+            'modality_gate': 0.0,
             'hard_neg_scale': 1.0,
             'label_smoothing': args.label_smoothing,
         }
@@ -286,6 +290,10 @@ def phase_weights(epoch, args):
     ranking = args.ranking_weight * (0.15 + 0.85 * ramp)
     contrastive = args.contrastive_weight * max(0.0, (1.0 - ramp) ** 2)
     hard_neg = 0.02 + 0.10 * ramp
+    topology = 0.20 + 0.80 * ramp
+    positive_reg = 0.15 + 0.85 * ramp
+    attention_sparsity = 0.10 + 0.90 * ramp
+    modality_gate = 0.05 + 0.95 * ramp
     hard_neg_scale = 1.0 + 0.18 * ramp
     if progress < 0.75:
         label_smoothing = args.label_smoothing
@@ -297,6 +305,10 @@ def phase_weights(epoch, args):
         'ranking': ranking,
         'contrastive': contrastive,
         'hard_neg': hard_neg,
+        'topology': topology,
+        'positive_reg': positive_reg,
+        'attention_sparsity': attention_sparsity,
+        'modality_gate': modality_gate,
         'hard_neg_scale': hard_neg_scale,
         'label_smoothing': label_smoothing,
     }
@@ -523,10 +535,10 @@ if __name__ == '__main__':
                 + phase['ranking'] * ranking_loss
                 + phase['contrastive'] * contrastive_loss
                 + phase['hard_neg'] * hard_neg_loss
-                + args.topology_reg_weight * topology_loss
-                + args.positive_pair_reg_weight * positive_reg
-                + args.attention_sparsity_weight * sparsity_loss
-                + args.modality_gate_weight * gate_loss
+                + (args.topology_reg_weight * phase['topology']) * topology_loss
+                + (args.positive_pair_reg_weight * phase['positive_reg']) * positive_reg
+                + (args.attention_sparsity_weight * phase['attention_sparsity']) * sparsity_loss
+                + (args.modality_gate_weight * phase['modality_gate']) * gate_loss
             )
 
             optimizer.zero_grad()
