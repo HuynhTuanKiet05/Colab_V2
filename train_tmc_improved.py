@@ -302,6 +302,8 @@ if __name__ == '__main__':
         train_prior = train_prior.to(args.device)
 
         best_metrics = None
+        best_auc = -1.0
+        no_improve_epochs = 0
         ema_state_dict = None
 
         for epoch in range(args.epochs):
@@ -366,31 +368,24 @@ if __name__ == '__main__':
             test_pred = torch.argmax(test_score, dim=-1).cpu().numpy()
             auc, aupr, accuracy, precision, recall, f1, mcc = get_metric(y_test, test_pred, test_prob)
 
-            elapsed = timeit.default_timer() - global_start
-            print(
-                '\t\t'.join(
-                    map(
-                        str,
-                        [
-                            epoch + 1,
-                            round(elapsed, 2),
-                            round(float(auc), 5),
-                            round(float(aupr), 5),
-                            round(float(accuracy), 5),
-                            round(float(precision), 5),
-                            round(float(recall), 5),
-                            round(float(f1), 5),
-                            round(float(mcc), 5),
-                        ],
-                    )
-                )
-            )
-
-            if best_metrics is None or auc > best_metrics[0]:
+            if auc > best_auc + 1e-6:
+                best_auc = auc
+                no_improve_epochs = 0
                 best_metrics = (auc, aupr, accuracy, precision, recall, f1, mcc, epoch + 1)
                 if args.save_checkpoints:
                     state_to_save = ema_state_dict if ema_state_dict is not None else model.state_dict()
                     torch.save(state_to_save, os.path.join(args.result_dir, f'best_model_fold_{fold_idx}.pth'))
+            else:
+                no_improve_epochs += max(1, args.score_every)
+
+            elapsed = timeit.default_timer() - global_start
+            best_mark = ' [BEST]' if abs(auc - best_auc) < 1e-12 else ''
+            print(
+                f'Epoch {epoch + 1:4d} | {elapsed:7.2f}s | '
+                f'AUC {auc:.5f} | AUPR {aupr:.5f} | ACC {accuracy:.5f} | '
+                f'P {precision:.5f} | R {recall:.5f} | F1 {f1:.5f} | MCC {mcc:.5f}'
+                f'{best_mark} | NO_IMPROVE {no_improve_epochs}'
+            )
 
         if best_metrics is None:
             raise RuntimeError(f'No evaluation executed for fold {fold_idx}; check score_every/epochs.')
