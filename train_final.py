@@ -108,6 +108,59 @@ def normalize_prior_matrix(matrix):
     return matrix / matrix.max().clamp_min(1e-6)
 
 
+def build_similarity_regularizer(graph, similarity_matrix, device):
+    src, dst = graph.edges()
+    src = src.to(device)
+    dst = dst.to(device)
+    mask = src != dst
+    src = src[mask]
+    dst = dst[mask]
+    weights = similarity_matrix[src, dst]
+    weights = normalize_prior_matrix(weights)
+    return src, dst, weights
+
+
+def graph_smoothness_loss(embeddings, regularizer_data, max_edges=None):
+    src, dst, weights = regularizer_data
+    if src.numel() == 0:
+        return embeddings.new_tensor(0.0)
+    if max_edges is not None and src.numel() > max_edges:
+        idx = torch.randperm(src.numel(), device=embeddings.device)[:max_edges]
+        src = src[idx]
+        dst = dst[idx]
+        weights = weights[idx]
+    diff = (embeddings[src] - embeddings[dst]).pow(2).mean(dim=-1)
+    return (diff * (0.25 + 0.75 * weights)).mean()
+
+
+def positive_pair_topology_loss(drug_repr, disease_repr, positive_edges, max_pairs=None):
+    if positive_edges.numel() == 0:
+        return drug_repr.new_tensor(0.0)
+    if max_pairs is not None and positive_edges.shape[0] > max_pairs:
+        idx = torch.randperm(positive_edges.shape[0], device=positive_edges.device)[:max_pairs]
+        positive_edges = positive_edges[idx]
+    drug_nodes = drug_repr[positive_edges[:, 0]]
+    disease_nodes = disease_repr[positive_edges[:, 1]]
+    cosine = fn.cosine_similarity(drug_nodes, disease_nodes, dim=-1)
+    return (1.0 - cosine).mean()
+
+
+def attention_sparsity_loss(aux_losses):
+    penalty = 0.0
+    eps = 1e-8
+    for key in ('drug_view_weights', 'disease_view_weights', 'drug_token_weights', 'disease_token_weights'):
+        weights = aux_losses[key].clamp_min(eps)
+        penalty = penalty + (-(weights * torch.log(weights)).sum(dim=-1).mean())
+    return penalty / 4.0
+
+
+def modality_gate_regularization(aux_losses):
+    penalty = 0.0
+    for key in ('drug_view_gates', 'disease_view_gates', 'drug_token_gates', 'disease_token_gates'):
+        penalty = penalty + aux_losses[key].mean()
+    return penalty / 4.0
+
+
 def weighted_classification_loss(logits, targets, class_weights, focal_criterion, label_smoothing, hard_negative_weight, use_focal):
     probs = fn.softmax(logits.detach(), dim=-1)[:, 1]
     sample_weights = torch.ones_like(probs)
@@ -307,6 +360,12 @@ if __name__ == '__main__':
     parser.add_argument('--ranking_samples', default=2048, type=int, help='maximum positive-negative pairs used in ranking loss')
     parser.add_argument('--hard_negative_weight', default=2.0, type=float, help='reweight difficult negatives based on current positive score')
     parser.add_argument('--path_bias_scale', default=0.30, type=float, help='strength of the indirect topology prior used at train and eval time')
+    parser.add_argument('--topology_reg_weight', default=0.03, type=float, help='smoothness regularization strength on similarity graphs')
+    parser.add_argument('--positive_pair_reg_weight', default=0.015, type=float, help='topological regularization strength on known positive drug-disease pairs')
+    parser.add_argument('--attention_sparsity_weight', default=0.004, type=float, help='entropy penalty that encourages selective modality usage')
+    parser.add_argument('--modality_gate_weight', default=0.003, type=float, help='L1-style penalty that encourages skipping noisy modalities through selective gates')
+    parser.add_argument('--reg_edge_samples', default=12000, type=int, help='maximum similarity edges sampled for topology regularization each step')
+    parser.add_argument('--reg_positive_samples', default=2048, type=int, help='maximum positive drug-disease pairs sampled for topology regularization each step')
     parser.add_argument('--label_smoothing', default=0.01, type=float, help='label smoothing for cross entropy')
     parser.add_argument('--patience', default=150, type=int, help='early stopping patience in epochs without AUC improvement')
     parser.add_argument('--target_auc', default=0.96, type=float, help=argparse.SUPPRESS)
@@ -358,6 +417,10 @@ if __name__ == '__main__':
     drug_view_graphs, disease_view_graphs, data = dgl_similarity_view_graphs(data, args)
     drug_view_graphs = {name: graph.to(device) for name, graph in drug_view_graphs.items()}
     disease_view_graphs = {name: graph.to(device) for name, graph in disease_view_graphs.items()}
+    drug_similarity_matrix = torch.FloatTensor(data['drs']).to(device)
+    disease_similarity_matrix = torch.FloatTensor(data['dis']).to(device)
+    drug_similarity_reg = build_similarity_regularizer(drug_view_graphs['consensus'], drug_similarity_matrix, device)
+    disease_similarity_reg = build_similarity_regularizer(disease_view_graphs['consensus'], disease_similarity_matrix, device)
 
     drug_feature = torch.FloatTensor(data['drugfeature']).to(device)
     disease_feature = torch.FloatTensor(data['diseasefeature']).to(device)
@@ -392,6 +455,7 @@ if __name__ == '__main__':
         warm_focal_criterion = FocalLoss(alpha=class_weights, gamma=args.focal_gamma_warm, reduction='none')
 
         train_positive_edges = positive_training_edges(data['X_train'][i], data['Y_train'][i])
+        train_positive_edges_tensor = torch.LongTensor(train_positive_edges).to(device)
         drdipr_graph, data, edge_stats = dgl_heterograph(data, train_positive_edges, args)
         drdipr_graph = drdipr_graph.to(device)
         edge_stats = {k: v.to(device) for k, v in edge_stats.items()}
@@ -431,7 +495,26 @@ if __name__ == '__main__':
             ranking_loss = pair_ranking_loss(train_score, Y_train, args.ranking_margin, args.ranking_samples)
             hard_neg_loss = hard_negative_mining_loss(train_score, Y_train)
             contrastive_loss = aux_losses['contrastive']
-            train_loss = classification_loss + phase['ranking'] * ranking_loss + phase['contrastive'] * contrastive_loss + phase['hard_neg'] * hard_neg_loss
+            topology_loss = graph_smoothness_loss(aux_losses['drug_repr'], drug_similarity_reg, max_edges=args.reg_edge_samples)
+            topology_loss = topology_loss + graph_smoothness_loss(aux_losses['disease_repr'], disease_similarity_reg, max_edges=args.reg_edge_samples)
+            positive_reg = positive_pair_topology_loss(
+                aux_losses['drug_repr'],
+                aux_losses['disease_repr'],
+                train_positive_edges_tensor,
+                max_pairs=args.reg_positive_samples,
+            )
+            sparsity_loss = attention_sparsity_loss(aux_losses)
+            gate_loss = modality_gate_regularization(aux_losses)
+            train_loss = (
+                classification_loss
+                + phase['ranking'] * ranking_loss
+                + phase['contrastive'] * contrastive_loss
+                + phase['hard_neg'] * hard_neg_loss
+                + args.topology_reg_weight * topology_loss
+                + args.positive_pair_reg_weight * positive_reg
+                + args.attention_sparsity_weight * sparsity_loss
+                + args.modality_gate_weight * gate_loss
+            )
 
             optimizer.zero_grad()
             train_loss.backward()
@@ -445,7 +528,8 @@ if __name__ == '__main__':
                 print(
                     f'Epoch {epoch + 1:4d} | {elapsed:7.2f}s | loss {train_loss.item():.5f} | '
                     f'cls {classification_loss.item():.5f} | rank {ranking_loss.item():.5f} | '
-                    f'ctr {contrastive_loss.item():.5f} | lr {scheduler.get_last_lr()[0]:.6e}'
+                    f'ctr {contrastive_loss.item():.5f} | topo {topology_loss.item():.5f} | '
+                    f'sparse {sparsity_loss.item():.5f} | gate {gate_loss.item():.5f} | lr {scheduler.get_last_lr()[0]:.6e}'
                 )
 
             should_score = (epoch + 1) >= args.eval_start_epoch and ((epoch + 1 - args.eval_start_epoch) % max(1, args.score_every) == 0)

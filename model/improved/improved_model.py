@@ -32,6 +32,33 @@ class MultiViewFusion(nn.Module):
         return self.out_norm(fused), weights
 
 
+class SelectiveTokenGate(nn.Module):
+    def __init__(self, dim, dropout):
+        super().__init__()
+        hidden = max(dim // 2, 64)
+        self.skip_proj = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
+        self.gate = nn.Sequential(
+            nn.LayerNorm(dim * 3),
+            nn.Linear(dim * 3, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, tokens):
+        context = tokens.mean(dim=1, keepdim=True).expand_as(tokens)
+        skip = self.skip_proj(context)
+        gate_features = torch.cat([tokens, context, tokens - context], dim=-1)
+        gates = torch.sigmoid(self.gate(gate_features))
+        gated = gates * tokens + (1.0 - gates) * skip
+        return gated, gates.squeeze(-1)
+
+
 class TokenMixer(nn.Module):
     def __init__(self, dim, num_tokens, num_heads, num_layers, dropout):
         super().__init__()
@@ -190,8 +217,12 @@ class AMNTDDA(nn.Module):
         )
 
         mix_heads = _valid_num_heads(args.gt_out_dim, args.tr_head)
+        self.drug_view_gate = SelectiveTokenGate(args.gt_out_dim, args.dropout)
+        self.disease_view_gate = SelectiveTokenGate(args.gt_out_dim, args.dropout)
         self.drug_view_fusion = MultiViewFusion(args.gt_out_dim, args.dropout)
         self.disease_view_fusion = MultiViewFusion(args.gt_out_dim, args.dropout)
+        self.drug_token_gate = SelectiveTokenGate(args.gt_out_dim, args.dropout)
+        self.disease_token_gate = SelectiveTokenGate(args.gt_out_dim, args.dropout)
         self.drug_token_mixer = TokenMixer(args.gt_out_dim, num_tokens=5, num_heads=mix_heads, num_layers=args.tr_layer, dropout=args.dropout)
         self.disease_token_mixer = TokenMixer(args.gt_out_dim, num_tokens=5, num_heads=mix_heads, num_layers=args.tr_layer, dropout=args.dropout)
 
@@ -243,6 +274,8 @@ class AMNTDDA(nn.Module):
 
         drug_view_stack = torch.stack([drug_views['fingerprint'], drug_views['gip'], drug_views['consensus']], dim=1)
         disease_view_stack = torch.stack([disease_views['phenotype'], disease_views['gip'], disease_views['consensus']], dim=1)
+        drug_view_stack, drug_view_gates = self.drug_view_gate(drug_view_stack)
+        disease_view_stack, disease_view_gates = self.disease_view_gate(disease_view_stack)
 
         drug_view_fused, drug_view_weights = self.drug_view_fusion(drug_view_stack)
         disease_view_fused, disease_view_weights = self.disease_view_fusion(disease_view_stack)
@@ -273,6 +306,8 @@ class AMNTDDA(nn.Module):
             [disease_views['phenotype'], disease_views['gip'], disease_views['consensus'], disease_hgt, raw_disease_token],
             dim=1,
         )
+        drug_tokens, drug_token_gates = self.drug_token_gate(drug_tokens)
+        disease_tokens, disease_token_gates = self.disease_token_gate(disease_tokens)
         drug_repr, drug_token_weights = self.drug_token_mixer(drug_tokens)
         disease_repr, disease_token_weights = self.disease_token_mixer(disease_tokens)
 
@@ -287,10 +322,16 @@ class AMNTDDA(nn.Module):
         self.cached_aux = {
             'contrastive': self._contrastive_loss(self.drug_align_sim(drug_view_fused), self.drug_align_hgt(drug_hgt))
             + self._contrastive_loss(self.disease_align_sim(disease_view_fused), self.disease_align_hgt(disease_hgt)),
-            'drug_view_weights': drug_view_weights.detach(),
-            'disease_view_weights': disease_view_weights.detach(),
-            'drug_token_weights': drug_token_weights.detach(),
-            'disease_token_weights': disease_token_weights.detach(),
+            'drug_view_weights': drug_view_weights,
+            'disease_view_weights': disease_view_weights,
+            'drug_token_weights': drug_token_weights,
+            'disease_token_weights': disease_token_weights,
+            'drug_view_gates': drug_view_gates,
+            'disease_view_gates': disease_view_gates,
+            'drug_token_gates': drug_token_gates,
+            'disease_token_gates': disease_token_gates,
+            'drug_repr': drug_repr,
+            'disease_repr': disease_repr,
             'topology_score': topology_score.detach(),
             'edge_bias': edge_bias.detach(),
         }
