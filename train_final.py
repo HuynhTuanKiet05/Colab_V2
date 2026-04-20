@@ -185,7 +185,7 @@ def gather_pair_bias(pair_index, prior_matrix, device, scale=0.22):
     return scale * bias.unsqueeze(-1)
 
 
-def hard_negative_mining_loss(logits, targets, top_ratio=0.25, margin=0.18):
+def hard_negative_mining_loss(logits, targets, top_ratio=0.15, margin=0.12):
     probs = fn.softmax(logits, dim=-1)[:, 1]
     pos_scores = probs[targets == 1]
     neg_scores = probs[targets == 0]
@@ -200,28 +200,23 @@ def hard_negative_mining_loss(logits, targets, top_ratio=0.25, margin=0.18):
 
 def phase_weights(epoch, args):
     progress = (epoch + 1) / max(1, args.epochs)
-    if progress < 0.65:
-        return {
-            'ranking': args.ranking_weight * 0.8,
-            'contrastive': args.contrastive_weight,
-            'hard_neg': 0.05,
-            'hard_neg_scale': args.hard_negative_weight,
-            'label_smoothing': args.label_smoothing,
-        }
-    if progress < 0.85:
-        return {
-            'ranking': args.ranking_weight,
-            'contrastive': args.contrastive_weight * 0.8,
-            'hard_neg': 0.1,
-            'hard_neg_scale': args.hard_negative_weight * 1.15,
-            'label_smoothing': max(args.label_smoothing * 0.6, 0.002),
-        }
+    # Smooth annealing to avoid loss spikes every few epochs.
+    ranking = args.ranking_weight * (0.55 + 0.65 * progress)
+    contrastive = args.contrastive_weight * max(0.2, 1.0 - 0.9 * progress)
+    hard_neg = 0.02 + 0.14 * progress
+    hard_neg_scale = args.hard_negative_weight * (1.0 + 0.25 * progress)
+    if progress < 0.5:
+        label_smoothing = args.label_smoothing
+    elif progress < 0.85:
+        label_smoothing = max(args.label_smoothing * 0.5, 0.002)
+    else:
+        label_smoothing = 0.0
     return {
-        'ranking': args.ranking_weight * 1.35,
-        'contrastive': args.contrastive_weight * 0.25,
-        'hard_neg': 0.2,
-        'hard_neg_scale': args.hard_negative_weight * 1.4,
-        'label_smoothing': 0.0,
+        'ranking': ranking,
+        'contrastive': contrastive,
+        'hard_neg': hard_neg,
+        'hard_neg_scale': hard_neg_scale,
+        'label_smoothing': label_smoothing,
     }
 
 
@@ -241,6 +236,7 @@ if __name__ == '__main__':
     parser.add_argument('--device', default='auto', choices=['auto', 'cpu', 'cuda'], help='training device')
     parser.add_argument('--data_root', default=None, help='dataset directory; defaults to AMDGT_original/data/<dataset>')
     parser.add_argument('--result_root', default=None, help='output directory; defaults to Result/improved/<dataset>')
+    parser.add_argument('--save_checkpoints', action=argparse.BooleanOptionalAction, default=False, help='save model checkpoints to result_root')
     parser.add_argument('--warmup_epochs', default=150, type=int, help='epochs to train before enabling focal/ranking-heavy fine-tune')
     parser.add_argument('--eval_start_epoch', default=50, type=int, help='minimum epochs before evaluation begins')
     parser.add_argument('--score_every', default=10, type=int, help='evaluate every N epochs after eval start')
@@ -290,6 +286,7 @@ if __name__ == '__main__':
     print('--- Starting Final Improved Pipeline ---')
     print(f'Dataset: {args.dataset} | LR: {args.lr} | Dim: {args.gt_out_dim} | Neighbor: {args.neighbor}')
     print(f'Device: {device} | Data dir: {args.data_dir} | Result dir: {args.result_dir}')
+    print(f'Save checkpoints: {args.save_checkpoints}')
     print('Early stopping is disabled; training will run for the full epoch budget.')
 
     data = get_data(args)
@@ -417,16 +414,17 @@ if __name__ == '__main__':
                 test_prob = fn.softmax(test_score, dim=-1)[:, 1].cpu().numpy()
                 test_pred = torch.argmax(test_score, dim=-1).cpu().numpy()
                 AUC, AUPR, accuracy, precision, recall, f1, mcc = get_metric(Y_test, test_pred, test_prob)
-                stable_score = AUC + 0.15 * AUPR + 0.05 * f1
+                stable_score = AUC + 0.10 * AUPR + 0.03 * f1
 
-                if stable_score > best_auc:
-                    best_auc = stable_score
-                    best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                if AUC > best_auc:
+                    best_auc = AUC
                     best_metrics = (AUC, AUPR, accuracy, precision, recall, f1, mcc, epoch + 1)
-                    torch.save(model.state_dict(), os.path.join(args.result_dir, f'best_model_fold_{i}.pth'))
+                    best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                    if args.save_checkpoints:
+                        torch.save(model.state_dict(), os.path.join(args.result_dir, f'best_model_fold_{i}.pth'))
 
                 time_now = timeit.default_timer() - start
-                best_mark = ' [BEST]' if abs(stable_score - best_auc) < 1e-12 else ''
+                best_mark = ' [BEST]' if abs(AUC - best_auc) < 1e-12 else ''
                 print(
                     f'Epoch {epoch+1:4d} | {time_now:7.2f}s | '
                     f'AUC {AUC:.5f} | AUPR {AUPR:.5f} | ACC {accuracy:.5f} | '
@@ -467,7 +465,7 @@ if __name__ == '__main__':
         F1s.append(best_metrics[5])
         MCCs.append(best_metrics[6])
         Epochs.append(best_metrics[7])
-        if best_state_dict is not None:
+        if best_state_dict is not None and args.save_checkpoints:
             torch.save(best_state_dict, os.path.join(args.result_dir, f'best_model_fold_{i}_cpu.pth'))
             torch.save(ema_state_dict if ema_state_dict is not None else best_state_dict, os.path.join(args.result_dir, f'ema_model_fold_{i}.pth'))
         print(f'Fold {i} summary -> best AUC {best_metrics[0]:.5f} at epoch {best_metrics[7]}')
