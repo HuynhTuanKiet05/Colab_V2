@@ -160,11 +160,7 @@ Day la bo tham so improved hien tai de train full:
   --patience 180 \
   --contrastive_weight 0.025 \
   --ranking_weight 0.14 \
-  --path_bias_scale 0.30 \
-  --topology_reg_weight 0.03 \
-  --positive_pair_reg_weight 0.015 \
-  --attention_sparsity_weight 0.004 \
-  --modality_gate_weight 0.003
+  --path_bias_scale 0.30
 ```
 
 Ket qua full 10-fold se duoc ghi ra:
@@ -211,11 +207,7 @@ thi dung:
   --patience 180 \
   --contrastive_weight 0.025 \
   --ranking_weight 0.14 \
-  --path_bias_scale 0.30 \
-  --topology_reg_weight 0.03 \
-  --positive_pair_reg_weight 0.015 \
-  --attention_sparsity_weight 0.004 \
-  --modality_gate_weight 0.003
+  --path_bias_scale 0.30
 ```
 
 Ket qua subset se duoc ghi ra file rieng, vi du:

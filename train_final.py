@@ -375,10 +375,10 @@ if __name__ == '__main__':
     parser.add_argument('--ranking_samples', default=2048, type=int, help='maximum positive-negative pairs used in ranking loss')
     parser.add_argument('--hard_negative_weight', default=2.0, type=float, help='reweight difficult negatives based on current positive score')
     parser.add_argument('--path_bias_scale', default=0.30, type=float, help='strength of the indirect topology prior used at train and eval time')
-    parser.add_argument('--topology_reg_weight', default=0.03, type=float, help='smoothness regularization strength on similarity graphs')
-    parser.add_argument('--positive_pair_reg_weight', default=0.015, type=float, help='topological regularization strength on known positive drug-disease pairs')
-    parser.add_argument('--attention_sparsity_weight', default=0.004, type=float, help='entropy penalty that encourages selective modality usage')
-    parser.add_argument('--modality_gate_weight', default=0.003, type=float, help='L1-style penalty that encourages skipping noisy modalities through selective gates')
+    parser.add_argument('--topology_reg_weight', default=0.0, type=float, help='smoothness regularization strength on similarity graphs')
+    parser.add_argument('--positive_pair_reg_weight', default=0.0, type=float, help='topological regularization strength on known positive drug-disease pairs')
+    parser.add_argument('--attention_sparsity_weight', default=0.0, type=float, help='entropy penalty that encourages selective modality usage')
+    parser.add_argument('--modality_gate_weight', default=0.0, type=float, help='L1-style penalty that encourages skipping noisy modalities through selective gates')
     parser.add_argument('--reg_edge_samples', default=12000, type=int, help='maximum similarity edges sampled for topology regularization each step')
     parser.add_argument('--reg_positive_samples', default=2048, type=int, help='maximum positive drug-disease pairs sampled for topology regularization each step')
     parser.add_argument('--label_smoothing', default=0.01, type=float, help='label smoothing for cross entropy')
@@ -398,6 +398,7 @@ if __name__ == '__main__':
     parser.add_argument('--gt_out_dim', default=160, type=int, help='GT output dimension')
     parser.add_argument('--tr_layer', default=2, type=int, help='Transformer layers')
     parser.add_argument('--tr_head', default=4, type=int, help='Transformer heads')
+    parser.add_argument('--use_selective_gating', action=argparse.BooleanOptionalAction, default=False, help='Enable selective gating over multimodal views/tokens')
     parser.add_argument('--use_relation_attention', action=argparse.BooleanOptionalAction, default=True, help='Use relation-aware attention in HGT')
     parser.add_argument('--use_metapath', action=argparse.BooleanOptionalAction, default=True, help='Use metapath aggregation')
     parser.add_argument('--use_global_hgt', action=argparse.BooleanOptionalAction, default=True, help='Use global context in HGT')
@@ -520,16 +521,24 @@ if __name__ == '__main__':
             ranking_loss = pair_ranking_loss(train_score, Y_train, args.ranking_margin, args.ranking_samples)
             hard_neg_loss = hard_negative_mining_loss(train_score, Y_train)
             contrastive_loss = aux_losses['contrastive']
-            topology_loss = graph_smoothness_loss(aux_losses['drug_repr'], drug_similarity_reg, max_edges=args.reg_edge_samples)
-            topology_loss = topology_loss + graph_smoothness_loss(aux_losses['disease_repr'], disease_similarity_reg, max_edges=args.reg_edge_samples)
-            positive_reg = positive_pair_topology_loss(
-                aux_losses['drug_repr'],
-                aux_losses['disease_repr'],
-                train_positive_edges_tensor,
-                max_pairs=args.reg_positive_samples,
-            )
-            sparsity_loss = attention_sparsity_loss(aux_losses)
-            gate_loss = modality_gate_regularization(aux_losses)
+            topology_loss = train_score.new_tensor(0.0)
+            if args.topology_reg_weight > 0:
+                topology_loss = graph_smoothness_loss(aux_losses['drug_repr'], drug_similarity_reg, max_edges=args.reg_edge_samples)
+                topology_loss = topology_loss + graph_smoothness_loss(aux_losses['disease_repr'], disease_similarity_reg, max_edges=args.reg_edge_samples)
+            positive_reg = train_score.new_tensor(0.0)
+            if args.positive_pair_reg_weight > 0:
+                positive_reg = positive_pair_topology_loss(
+                    aux_losses['drug_repr'],
+                    aux_losses['disease_repr'],
+                    train_positive_edges_tensor,
+                    max_pairs=args.reg_positive_samples,
+                )
+            sparsity_loss = train_score.new_tensor(0.0)
+            if args.attention_sparsity_weight > 0:
+                sparsity_loss = attention_sparsity_loss(aux_losses)
+            gate_loss = train_score.new_tensor(0.0)
+            if args.use_selective_gating and args.modality_gate_weight > 0:
+                gate_loss = modality_gate_regularization(aux_losses)
             train_loss = (
                 classification_loss
                 + phase['ranking'] * ranking_loss
@@ -585,7 +594,6 @@ if __name__ == '__main__':
                 test_prob = fn.softmax(test_score, dim=-1)[:, 1].cpu().numpy()
                 test_pred = torch.argmax(test_score, dim=-1).cpu().numpy()
                 AUC, AUPR, accuracy, precision, recall, f1, mcc = get_metric(Y_test, test_pred, test_prob)
-                stable_score = AUC + 0.10 * AUPR + 0.03 * f1
 
                 if AUC > best_auc + 1e-6:
                     best_auc = AUC
@@ -602,8 +610,8 @@ if __name__ == '__main__':
                 print(
                     f'Epoch {epoch+1:4d} | {time_now:7.2f}s | '
                     f'AUC {AUC:.5f} | AUPR {AUPR:.5f} | ACC {accuracy:.5f} | '
-                    f'P {precision:.5f} | R {recall:.5f} | F1 {f1:.5f} | MCC {mcc:.5f} | '
-                    f'STABLE {stable_score:.5f}{best_mark} | NO_IMPROVE {no_improve_epochs}'
+                    f'P {precision:.5f} | R {recall:.5f} | F1 {f1:.5f} | MCC {mcc:.5f}'
+                    f'{best_mark} | NO_IMPROVE {no_improve_epochs}'
                 )
                 if no_improve_epochs >= args.patience:
                     print(f'Early stopping at epoch {epoch+1} after {no_improve_epochs} epochs without AUC improvement.')

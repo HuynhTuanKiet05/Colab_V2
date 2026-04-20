@@ -153,6 +153,7 @@ class AMNTDDA(nn.Module):
         super(AMNTDDA, self).__init__()
         self.args = args
         self.runtime_device = torch.device(os.environ.get('AMDGT_DEVICE', 'cuda' if torch.cuda.is_available() else 'cpu'))
+        self.use_selective_gating = getattr(args, 'use_selective_gating', False)
         self.drug_feature_dim = 300
         self.disease_feature_dim = 64
         self.protein_feature_dim = 320
@@ -274,8 +275,16 @@ class AMNTDDA(nn.Module):
 
         drug_view_stack = torch.stack([drug_views['fingerprint'], drug_views['gip'], drug_views['consensus']], dim=1)
         disease_view_stack = torch.stack([disease_views['phenotype'], disease_views['gip'], disease_views['consensus']], dim=1)
-        drug_view_stack, drug_view_gates = self.drug_view_gate(drug_view_stack)
-        disease_view_stack, disease_view_gates = self.disease_view_gate(disease_view_stack)
+        if self.use_selective_gating:
+            drug_view_stack, drug_view_gates = self.drug_view_gate(drug_view_stack)
+            disease_view_stack, disease_view_gates = self.disease_view_gate(disease_view_stack)
+        else:
+            drug_view_gates = torch.ones(
+                drug_view_stack.shape[0], drug_view_stack.shape[1], device=drug_view_stack.device, dtype=drug_view_stack.dtype
+            )
+            disease_view_gates = torch.ones(
+                disease_view_stack.shape[0], disease_view_stack.shape[1], device=disease_view_stack.device, dtype=disease_view_stack.dtype
+            )
 
         drug_view_fused, drug_view_weights = self.drug_view_fusion(drug_view_stack)
         disease_view_fused, disease_view_weights = self.disease_view_fusion(disease_view_stack)
@@ -306,8 +315,16 @@ class AMNTDDA(nn.Module):
             [disease_views['phenotype'], disease_views['gip'], disease_views['consensus'], disease_hgt, raw_disease_token],
             dim=1,
         )
-        drug_tokens, drug_token_gates = self.drug_token_gate(drug_tokens)
-        disease_tokens, disease_token_gates = self.disease_token_gate(disease_tokens)
+        if self.use_selective_gating:
+            drug_tokens, drug_token_gates = self.drug_token_gate(drug_tokens)
+            disease_tokens, disease_token_gates = self.disease_token_gate(disease_tokens)
+        else:
+            drug_token_gates = torch.ones(
+                drug_tokens.shape[0], drug_tokens.shape[1], device=drug_tokens.device, dtype=drug_tokens.dtype
+            )
+            disease_token_gates = torch.ones(
+                disease_tokens.shape[0], disease_tokens.shape[1], device=disease_tokens.device, dtype=disease_tokens.dtype
+            )
         drug_repr, drug_token_weights = self.drug_token_mixer(drug_tokens)
         disease_repr, disease_token_weights = self.disease_token_mixer(disease_tokens)
 
