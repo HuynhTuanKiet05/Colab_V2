@@ -302,12 +302,14 @@ def phase_weights(epoch, args):
     }
 
 
-def build_results_dataframe(fold_metrics):
+def build_results_dataframe(fold_metrics, fold_ids=None):
     columns = ['Fold', 'Best_Epoch', 'AUC', 'AUPR', 'Accuracy', 'Precision', 'Recall', 'F1-score', 'Mcc']
     metric_columns = columns[2:]
+    if fold_ids is None:
+        fold_ids = list(range(len(fold_metrics['AUC'])))
     results_df = pd.DataFrame(
         {
-            'Fold': [f'Fold {i}' for i in range(len(fold_metrics['AUC']))],
+            'Fold': [f'Fold {i}' for i in fold_ids],
             'Best_Epoch': fold_metrics['Best_Epoch'],
             'AUC': fold_metrics['AUC'],
             'AUPR': fold_metrics['AUPR'],
@@ -333,6 +335,7 @@ def build_results_dataframe(fold_metrics):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--k_fold', type=int, default=10, help='k-fold cross validation')
+    parser.add_argument('--fold_indices', nargs='+', type=int, default=None, help='optional subset of fold indices to run, e.g. --fold_indices 1 2 4 8')
     parser.add_argument('--epochs', type=int, default=1000, help='number of epochs to train')
     parser.add_argument('--lr', type=float, default=0.0003, help='learning rate')
     parser.add_argument('--weight_decay', type=float, default=0.0005, help='weight decay')
@@ -414,6 +417,14 @@ if __name__ == '__main__':
     data = data_processing(data, args)
     data = k_fold(data, args)
 
+    if args.fold_indices is None:
+        selected_folds = list(range(args.k_fold))
+    else:
+        selected_folds = list(dict.fromkeys(args.fold_indices))
+        invalid = [fold for fold in selected_folds if fold < 0 or fold >= args.k_fold]
+        if invalid:
+            raise ValueError(f'Invalid fold indices {invalid}; valid range is 0 to {args.k_fold - 1}')
+
     drug_view_graphs, disease_view_graphs, data = dgl_similarity_view_graphs(data, args)
     drug_view_graphs = {name: graph.to(device) for name, graph in drug_view_graphs.items()}
     disease_view_graphs = {name: graph.to(device) for name, graph in disease_view_graphs.items()}
@@ -429,7 +440,9 @@ if __name__ == '__main__':
     metric_header = 'Epoch\t\tTime\t\tAUC\t\tAUPR\t\tAccuracy\t\tPrecision\t\tRecall\t\tF1-score\t\tMcc'
     AUCs, AUPRs, Accs, Precs, Recs, F1s, MCCs, Epochs = [], [], [], [], [], [], [], []
 
-    for i in range(args.k_fold):
+    print(f'Running folds: {selected_folds}')
+
+    for i in selected_folds:
         print(f'\n--- Fold: {i} ---')
         print(metric_header)
 
@@ -641,12 +654,19 @@ if __name__ == '__main__':
             'Recall': Recs,
             'F1-score': F1s,
             'Mcc': MCCs,
-        }
+        },
+        fold_ids=selected_folds,
     )
 
     print('\n' + '=' * 30 + '\nFINAL RESULTS SUMMARY (IMPROVED PIPELINE)\n' + '=' * 30)
     print(final_df.iloc[-2:])
 
-    csv_path = os.path.join(args.result_dir, '10_fold_results_improved.csv')
+    if len(selected_folds) == args.k_fold and selected_folds == list(range(args.k_fold)):
+        csv_name = '10_fold_results_improved.csv'
+    else:
+        fold_tag = '_'.join(str(fold) for fold in selected_folds)
+        csv_name = f'selected_fold_results_improved_{fold_tag}.csv'
+        print('Subset fold run detected: Mean/Std rows are computed only over the selected folds above.')
+    csv_path = os.path.join(args.result_dir, csv_name)
     final_df.to_csv(csv_path, index=False)
     print(f'\nSaved improved results to: {csv_path}')
