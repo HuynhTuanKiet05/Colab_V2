@@ -205,7 +205,7 @@ Day la huong tham khao tu do an ban cua ban: giu backbone AMDGT, bo sung topolog
 
 Ket qua full 10-fold se duoc ghi ra:
 
-- `Result/tmc_improved/C-dataset/10_fold_results_tmc_improved.csv`
+- `Result/tmc_improved/C-dataset/10_fold_results_improved.csv`
 
 ## 6. Chay rieng cac fold yeu de tune nhanh
 

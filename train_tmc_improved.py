@@ -317,9 +317,9 @@ if __name__ == '__main__':
     print(final_df.iloc[-2:])
 
     if len(selected_folds) == args.k_fold and selected_folds == list(range(args.k_fold)):
-        csv_name = '10_fold_results_tmc_improved.csv'
+        csv_name = '10_fold_results_improved.csv'
     else:
-        csv_name = f"selected_fold_results_tmc_improved_{'_'.join(map(str, selected_folds))}.csv"
+        csv_name = f"selected_fold_results_improved_{'_'.join(map(str, selected_folds))}.csv"
     csv_path = os.path.join(args.result_dir, csv_name)
     final_df.to_csv(csv_path, index=False)
     print(f'\nSaved TMC results to: {csv_path}')
