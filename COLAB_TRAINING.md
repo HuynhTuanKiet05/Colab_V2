@@ -154,13 +154,16 @@ Day la bo tham so improved hien tai de train full:
   --gt_head 4 \
   --tr_layer 2 \
   --tr_head 8 \
+  --pair_decoder mlp \
   --warmup_epochs 140 \
   --eval_start_epoch 40 \
   --score_every 5 \
   --patience 180 \
   --contrastive_weight 0.025 \
   --ranking_weight 0.14 \
-  --path_bias_scale 0.30
+  --path_bias_scale 0.30 \
+  --direct_train_prior_weight 0.20 \
+  --no-eval_path_bias
 ```
 
 Ket qua full 10-fold se duoc ghi ra:
@@ -201,13 +204,16 @@ thi dung:
   --gt_head 4 \
   --tr_layer 2 \
   --tr_head 8 \
+  --pair_decoder mlp \
   --warmup_epochs 140 \
   --eval_start_epoch 40 \
   --score_every 5 \
   --patience 180 \
   --contrastive_weight 0.025 \
   --ranking_weight 0.14 \
-  --path_bias_scale 0.30
+  --path_bias_scale 0.30 \
+  --direct_train_prior_weight 0.20 \
+  --no-eval_path_bias
 ```
 
 Ket qua subset se duoc ghi ra file rieng, vi du:

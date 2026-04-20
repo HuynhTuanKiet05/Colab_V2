@@ -148,6 +148,33 @@ class PairMixtureOfExperts(nn.Module):
         return (weights * experts).sum(dim=1) + self.skip(full_features)
 
 
+class PairMLPDecoder(nn.Module):
+    def __init__(self, dim, dropout):
+        super().__init__()
+        hidden = max(dim * 2, 256)
+        compact = max(dim, 128)
+        self.decoder = nn.Sequential(
+            nn.LayerNorm(dim * 4 + 3),
+            nn.Linear(dim * 4 + 3, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, compact),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(compact, 2),
+        )
+
+    def forward(self, drug_repr, disease_repr, topology_score=None):
+        pair_mul = drug_repr * disease_repr
+        pair_diff = torch.abs(drug_repr - disease_repr)
+        pair_dot = (drug_repr * disease_repr).sum(dim=-1, keepdim=True)
+        pair_cos = F.cosine_similarity(drug_repr, disease_repr, dim=-1).unsqueeze(-1)
+        if topology_score is None:
+            topology_score = torch.zeros_like(pair_dot)
+        features = torch.cat([pair_mul, pair_diff, drug_repr + disease_repr, (drug_repr - disease_repr) ** 2, pair_dot, pair_cos, topology_score], dim=-1)
+        return self.decoder(features)
+
+
 class AMNTDDA(nn.Module):
     def __init__(self, args):
         super(AMNTDDA, self).__init__()
@@ -240,7 +267,11 @@ class AMNTDDA(nn.Module):
             nn.Linear(args.gt_out_dim, 1),
         )
         self.topology_scale = nn.Parameter(torch.tensor(0.15))
-        self.pair_scorer = PairMixtureOfExperts(args.gt_out_dim, args.dropout)
+        pair_decoder = getattr(args, 'pair_decoder', 'mlp')
+        if pair_decoder == 'moe':
+            self.pair_scorer = PairMixtureOfExperts(args.gt_out_dim, args.dropout)
+        else:
+            self.pair_scorer = PairMLPDecoder(args.gt_out_dim, args.dropout)
 
     def _prepare_graph_dict(self, graph_input, graph_names):
         if isinstance(graph_input, dict):

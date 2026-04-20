@@ -243,10 +243,12 @@ def build_path_prior(data, train_positive_edges, args):
     disease_support = (train_drdi @ disease_similarity) / drug_pos_counts
     collab_norm = normalize_prior_matrix(0.5 * (drug_support + disease_support))
 
-    # Do not inject the direct train association itself; that hurts
-    # generalization because test positives are unseen by design.
-    combined_prior = 0.45 * shared_norm + 0.40 * collab_norm + 0.15 * degree_norm
-    return normalize_prior_matrix(combined_prior)
+    train_assoc_norm = normalize_prior_matrix(train_drdi) if train_drdi.max() > 0 else train_drdi
+    indirect_prior = normalize_prior_matrix(0.50 * shared_norm + 0.35 * collab_norm + 0.15 * degree_norm)
+    train_prior = normalize_prior_matrix(
+        (1.0 - args.direct_train_prior_weight) * indirect_prior + args.direct_train_prior_weight * train_assoc_norm
+    )
+    return indirect_prior, train_prior
 
 
 def gather_pair_bias(pair_index, prior_matrix, device, scale=0.22):
@@ -375,6 +377,8 @@ if __name__ == '__main__':
     parser.add_argument('--ranking_samples', default=2048, type=int, help='maximum positive-negative pairs used in ranking loss')
     parser.add_argument('--hard_negative_weight', default=2.0, type=float, help='reweight difficult negatives based on current positive score')
     parser.add_argument('--path_bias_scale', default=0.30, type=float, help='strength of the indirect topology prior used at train and eval time')
+    parser.add_argument('--direct_train_prior_weight', default=0.20, type=float, help='fraction of direct training associations mixed into the train-only topology prior')
+    parser.add_argument('--eval_path_bias', action=argparse.BooleanOptionalAction, default=False, help='apply the indirect topology prior during evaluation as well')
     parser.add_argument('--topology_reg_weight', default=0.0, type=float, help='smoothness regularization strength on similarity graphs')
     parser.add_argument('--positive_pair_reg_weight', default=0.0, type=float, help='topological regularization strength on known positive drug-disease pairs')
     parser.add_argument('--attention_sparsity_weight', default=0.0, type=float, help='entropy penalty that encourages selective modality usage')
@@ -398,6 +402,7 @@ if __name__ == '__main__':
     parser.add_argument('--gt_out_dim', default=160, type=int, help='GT output dimension')
     parser.add_argument('--tr_layer', default=2, type=int, help='Transformer layers')
     parser.add_argument('--tr_head', default=4, type=int, help='Transformer heads')
+    parser.add_argument('--pair_decoder', choices=['mlp', 'moe'], default='mlp', help='pairwise decoder head; mlp is more stable, moe is more expressive')
     parser.add_argument('--use_selective_gating', action=argparse.BooleanOptionalAction, default=False, help='Enable selective gating over multimodal views/tokens')
     parser.add_argument('--use_relation_attention', action=argparse.BooleanOptionalAction, default=True, help='Use relation-aware attention in HGT')
     parser.add_argument('--use_metapath', action=argparse.BooleanOptionalAction, default=True, help='Use metapath aggregation')
@@ -405,6 +410,7 @@ if __name__ == '__main__':
     parser.add_argument('--use_topological', action=argparse.BooleanOptionalAction, default=True, help='Use topological metapath projection')
 
     args = parser.parse_args()
+    args.direct_train_prior_weight = min(max(args.direct_train_prior_weight, 0.0), 1.0)
     device = resolve_device(args.device)
     os.environ['AMDGT_DEVICE'] = device.type
     set_random_seed(args.random_seed)
@@ -485,7 +491,9 @@ if __name__ == '__main__':
         drdipr_graph, data, edge_stats = dgl_heterograph(data, train_positive_edges, args)
         drdipr_graph = drdipr_graph.to(device)
         edge_stats = {k: v.to(device) for k, v in edge_stats.items()}
-        path_prior = build_path_prior(data, train_positive_edges, args).to(device)
+        eval_prior, train_prior = build_path_prior(data, train_positive_edges, args)
+        eval_prior = eval_prior.to(device)
+        train_prior = train_prior.to(device)
 
         start = timeit.default_timer()
 
@@ -493,7 +501,7 @@ if __name__ == '__main__':
             model.train()
             phase = phase_weights(epoch, args)
             train_edge_stats = {
-                'pair_bias': gather_pair_bias(X_train, path_prior, device, scale=args.path_bias_scale)
+                'pair_bias': edge_stats['pair_bias'] + gather_pair_bias(X_train, train_prior, device, scale=args.path_bias_scale)
             }
             _, train_score, aux_losses = model(
                 drug_view_graphs,
@@ -568,9 +576,11 @@ if __name__ == '__main__':
 
             should_score = (epoch + 1) >= args.eval_start_epoch and ((epoch + 1 - args.eval_start_epoch) % max(1, args.score_every) == 0)
             if should_score:
-                test_edge_stats = {
-                    'pair_bias': gather_pair_bias(X_test, path_prior, device, scale=args.path_bias_scale)
-                }
+                test_edge_stats = None
+                if args.eval_path_bias:
+                    test_edge_stats = {
+                        'pair_bias': gather_pair_bias(X_test, eval_prior, device, scale=args.path_bias_scale)
+                    }
                 eval_state = ema_state_dict if ema_state_dict is not None else None
                 backup_state = None
                 if eval_state is not None:
@@ -618,9 +628,11 @@ if __name__ == '__main__':
                     break
 
         if best_metrics is None:
-            test_edge_stats = {
-                'pair_bias': gather_pair_bias(X_test, path_prior, device, scale=args.path_bias_scale)
-            }
+            test_edge_stats = None
+            if args.eval_path_bias:
+                test_edge_stats = {
+                    'pair_bias': gather_pair_bias(X_test, eval_prior, device, scale=args.path_bias_scale)
+                }
             eval_state = ema_state_dict if ema_state_dict is not None else None
             backup_state = None
             if eval_state is not None:
