@@ -250,7 +250,7 @@ if __name__ == '__main__':
     parser.add_argument('--ranking_samples', default=2048, type=int, help='maximum positive-negative pairs used in ranking loss')
     parser.add_argument('--hard_negative_weight', default=2.0, type=float, help='reweight difficult negatives based on current positive score')
     parser.add_argument('--label_smoothing', default=0.01, type=float, help='label smoothing for cross entropy')
-    parser.add_argument('--patience', default=120, type=int, help=argparse.SUPPRESS)
+    parser.add_argument('--patience', default=150, type=int, help='early stopping patience in epochs without AUC improvement')
     parser.add_argument('--target_auc', default=0.96, type=float, help=argparse.SUPPRESS)
     parser.add_argument('--target_auc_warmup', default=400, type=int, help=argparse.SUPPRESS)
     parser.add_argument('--target_auc_patience', default=4, type=int, help=argparse.SUPPRESS)
@@ -287,7 +287,7 @@ if __name__ == '__main__':
     print(f'Dataset: {args.dataset} | LR: {args.lr} | Dim: {args.gt_out_dim} | Neighbor: {args.neighbor}')
     print(f'Device: {device} | Data dir: {args.data_dir} | Result dir: {args.result_dir}')
     print(f'Save checkpoints: {args.save_checkpoints}')
-    print('Early stopping is disabled; training will run for the full epoch budget.')
+    print(f"Early stopping is enabled: stop after {args.patience} epochs without AUC improvement.")
 
     data = get_data(args)
     args.drug_number = data['drug_number']
@@ -320,6 +320,7 @@ if __name__ == '__main__':
         best_metrics = None
         best_state_dict = None
         ema_state_dict = None
+        no_improve_epochs = 0
 
         X_train = torch.LongTensor(data['X_train'][i]).to(device)
         Y_train = torch.LongTensor(data['Y_train'][i]).to(device).flatten()
@@ -416,15 +417,21 @@ if __name__ == '__main__':
                 AUC, AUPR, accuracy, precision, recall, f1, mcc = get_metric(Y_test, test_pred, test_prob)
                 stable_score = AUC + 0.10 * AUPR + 0.03 * f1
 
-                if AUC > best_auc:
+                if AUC > best_auc + 1e-6:
                     best_auc = AUC
                     best_metrics = (AUC, AUPR, accuracy, precision, recall, f1, mcc, epoch + 1)
                     best_state_dict = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+                    no_improve_epochs = 0
                     if args.save_checkpoints:
                         torch.save(model.state_dict(), os.path.join(args.result_dir, f'best_model_fold_{i}.pth'))
+                else:
+                    no_improve_epochs += args.score_every
 
                 time_now = timeit.default_timer() - start
                 best_mark = ' [BEST]' if abs(AUC - best_auc) < 1e-12 else ''
+                if no_improve_epochs >= args.patience:
+                    print(f'Early stopping at epoch {epoch+1} after {no_improve_epochs} epochs without AUC improvement.')
+                    break
                 print(
                     f'Epoch {epoch+1:4d} | {time_now:7.2f}s | '
                     f'AUC {AUC:.5f} | AUPR {AUPR:.5f} | ACC {accuracy:.5f} | '
