@@ -175,7 +175,7 @@ if __name__ == '__main__':
     print('--- Starting TMC-AMDGT-RVG Pipeline ---')
     print(f'Dataset: {args.dataset} | Device: {args.device} | Result dir: {args.result_dir}')
     print(f'Running folds: {selected_folds}')
-    print('Epoch\t\tTime\t\tLR\t\tLoss\t\tCL_Loss\t\tAUC\t\tAUPR\t\tAccuracy\t\tPrecision\t\tRecall\t\tF1-score\t\tMcc')
+    print('Epoch\t\tTime\t\tAUC\t\tAUPR\t\tAccuracy\t\tPrecision\t\tRecall\t\tF1-score\t\tMcc')
 
     aucs, auprs, accs, precs, recs, f1s, mccs, epochs = [], [], [], [], [], [], [], []
     global_start = timeit.default_timer()
@@ -251,7 +251,6 @@ if __name__ == '__main__':
 
             if scheduler is not None:
                 scheduler.step(auc)
-            current_lr = optimizer.param_groups[0]['lr']
             elapsed = timeit.default_timer() - global_start
             print(
                 '\t\t'.join(
@@ -260,9 +259,6 @@ if __name__ == '__main__':
                         [
                             epoch + 1,
                             round(elapsed, 2),
-                            f'{current_lr:.1e}',
-                            round(float(train_loss.item()), 5),
-                            round(float(cl_loss.item()), 5),
                             round(float(auc), 5),
                             round(float(aupr), 5),
                             round(float(accuracy), 5),
