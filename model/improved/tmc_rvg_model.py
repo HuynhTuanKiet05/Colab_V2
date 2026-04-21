@@ -27,6 +27,25 @@ class TopologyEncoder(nn.Module):
         return self.encoder(topo_features)
 
 
+class MultiViewFusion(nn.Module):
+    def __init__(self, dim, dropout=0.2):
+        super().__init__()
+        hidden = max(dim // 2, 64)
+        self.score = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 1),
+        )
+        self.out_norm = nn.LayerNorm(dim)
+
+    def forward(self, views):
+        weights = torch.softmax(self.score(views).squeeze(-1), dim=1)
+        fused = (weights.unsqueeze(-1) * views).sum(dim=1)
+        return self.out_norm(fused), weights
+
+
 class ContrastiveLoss(nn.Module):
     def __init__(self, temperature=0.5):
         super().__init__()
@@ -141,24 +160,66 @@ class TMC_AMDGT_RVG(nn.Module):
         self.disease_linear = nn.Linear(64, args.hgt_in_dim)
         self.protein_linear = nn.Linear(320, args.hgt_in_dim)
 
-        self.gt_drug = gt_net_drug.GraphTransformer(
-            self.device,
-            args.gt_layer,
-            args.drug_number,
-            args.gt_out_dim,
-            args.gt_out_dim,
-            args.gt_head,
-            args.dropout,
-        )
-        self.gt_disease = gt_net_disease.GraphTransformer(
-            self.device,
-            args.gt_layer,
-            args.disease_number,
-            args.gt_out_dim,
-            args.gt_out_dim,
-            args.gt_head,
-            args.dropout,
-        )
+        self.drug_view_encoders = nn.ModuleDict({
+            'fingerprint': gt_net_drug.GraphTransformer(
+                self.device,
+                args.gt_layer,
+                args.drug_number,
+                args.gt_out_dim,
+                args.gt_out_dim,
+                args.gt_head,
+                args.dropout,
+            ),
+            'gip': gt_net_drug.GraphTransformer(
+                self.device,
+                args.gt_layer,
+                args.drug_number,
+                args.gt_out_dim,
+                args.gt_out_dim,
+                args.gt_head,
+                args.dropout,
+            ),
+            'consensus': gt_net_drug.GraphTransformer(
+                self.device,
+                args.gt_layer,
+                args.drug_number,
+                args.gt_out_dim,
+                args.gt_out_dim,
+                args.gt_head,
+                args.dropout,
+            ),
+        })
+        self.disease_view_encoders = nn.ModuleDict({
+            'phenotype': gt_net_disease.GraphTransformer(
+                self.device,
+                args.gt_layer,
+                args.disease_number,
+                args.gt_out_dim,
+                args.gt_out_dim,
+                args.gt_head,
+                args.dropout,
+            ),
+            'gip': gt_net_disease.GraphTransformer(
+                self.device,
+                args.gt_layer,
+                args.disease_number,
+                args.gt_out_dim,
+                args.gt_out_dim,
+                args.gt_head,
+                args.dropout,
+            ),
+            'consensus': gt_net_disease.GraphTransformer(
+                self.device,
+                args.gt_layer,
+                args.disease_number,
+                args.gt_out_dim,
+                args.gt_out_dim,
+                args.gt_head,
+                args.dropout,
+            ),
+        })
+        self.drug_view_fusion = MultiViewFusion(args.gt_out_dim, dropout=args.dropout)
+        self.disease_view_fusion = MultiViewFusion(args.gt_out_dim, dropout=args.dropout)
 
         self.hgt_shared = dgl.nn.pytorch.conv.HGTConv(
             args.hgt_in_dim,
@@ -244,6 +305,21 @@ class TMC_AMDGT_RVG(nn.Module):
         )
         self.topology_scale = nn.Parameter(torch.tensor(0.20))
 
+    def _prepare_graph_dict(self, graph_input, graph_names):
+        if isinstance(graph_input, dict):
+            return graph_input
+        return {name: graph_input for name in graph_names}
+
+    def _encode_similarity_views(self, graph_input, encoders):
+        prepared = self._prepare_graph_dict(graph_input, encoders.keys())
+        fallback_graph = prepared.get('consensus', next(iter(prepared.values())))
+        fallback = encoders['consensus'](fallback_graph)
+        outputs = {'consensus': fallback}
+        for name, encoder in encoders.items():
+            graph = prepared.get(name)
+            outputs[name] = encoder(graph) if graph is not None else fallback
+        return outputs
+
     def _association_views(self, drdipr_graph, drug_feature, disease_feature, protein_feature):
         drug_feature = self.drug_linear(drug_feature)
         disease_feature = self.disease_linear(disease_feature)
@@ -279,8 +355,12 @@ class TMC_AMDGT_RVG(nn.Module):
         edge_stats=None,
         return_aux=False,
     ):
-        drug_sim = self.gt_drug(drdr_graph)
-        disease_sim = self.gt_disease(didi_graph)
+        drug_views = self._encode_similarity_views(drdr_graph, self.drug_view_encoders)
+        disease_views = self._encode_similarity_views(didi_graph, self.disease_view_encoders)
+        drug_sim_stack = torch.stack([drug_views['fingerprint'], drug_views['gip'], drug_views['consensus']], dim=1)
+        disease_sim_stack = torch.stack([disease_views['phenotype'], disease_views['gip'], disease_views['consensus']], dim=1)
+        drug_sim, drug_view_weights = self.drug_view_fusion(drug_sim_stack)
+        disease_sim, disease_view_weights = self.disease_view_fusion(disease_sim_stack)
         drug_assoc, disease_assoc = self._association_views(drdipr_graph, drug_feature, disease_feature, protein_feature)
 
         drug_base = self.drug_trans(torch.stack((drug_sim, drug_assoc), dim=1)).reshape(self.args.drug_number, -1)
@@ -330,6 +410,8 @@ class TMC_AMDGT_RVG(nn.Module):
                 'drug_repr': drug_repr,
                 'disease_repr': disease_repr,
                 'topology_score': topology_score.detach(),
+                'drug_view_weights': drug_view_weights.detach(),
+                'disease_view_weights': disease_view_weights.detach(),
             }
             return drug_repr, output, aux
 

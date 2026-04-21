@@ -16,10 +16,10 @@ import torch.optim as optim
 from AMDGT_original.data_preprocess import (
     data_processing,
     dgl_heterograph,
-    dgl_similarity_graph,
     get_data,
     k_fold,
 )
+from data_preprocess_improved import dgl_similarity_view_graphs
 from metric import get_metric
 from model.improved.tmc_rvg_model import TMC_AMDGT_RVG
 from similarity_fusion_improved import collect_similarity_views, repair_similarity_views
@@ -479,13 +479,15 @@ if __name__ == '__main__':
         if invalid:
             raise ValueError(f'Invalid fold indices {invalid}; valid range is 0..{args.k_fold - 1}')
 
-    drdr_graph, didi_graph, data = dgl_similarity_graph(data, args)
-    drdr_graph = drdr_graph.to(args.device)
-    didi_graph = didi_graph.to(args.device)
+    drug_view_graphs, disease_view_graphs, data = dgl_similarity_view_graphs(data, args)
+    drug_view_graphs = {name: graph.to(args.device) for name, graph in drug_view_graphs.items()}
+    disease_view_graphs = {name: graph.to(args.device) for name, graph in disease_view_graphs.items()}
     drug_similarity_matrix = prepare_similarity_tensor(data['drs']).to(args.device)
     disease_similarity_matrix = prepare_similarity_tensor(data['dis']).to(args.device)
-    drug_similarity_reg = build_similarity_regularizer(drdr_graph, drug_similarity_matrix, args.device)
-    disease_similarity_reg = build_similarity_regularizer(didi_graph, disease_similarity_matrix, args.device)
+    drug_similarity_reg = build_similarity_regularizer(drug_view_graphs['consensus'], drug_similarity_matrix, args.device)
+    disease_similarity_reg = build_similarity_regularizer(
+        disease_view_graphs['consensus'], disease_similarity_matrix, args.device
+    )
 
     drug_topo_feat, disease_topo_feat = extract_topology_features(data, args)
     drug_topo_feat = drug_topo_feat.to(args.device)
@@ -544,8 +546,8 @@ if __name__ == '__main__':
                 'pair_bias': args.path_bias_scale * train_pair_prior
             }
             _, train_score, aux_losses = model(
-                drdr_graph,
-                didi_graph,
+                drug_view_graphs,
+                disease_view_graphs,
                 drdipr_graph,
                 drug_feature,
                 disease_feature,
@@ -628,8 +630,8 @@ if __name__ == '__main__':
                 }
             with torch.no_grad():
                 _, test_score, _ = model(
-                    drdr_graph,
-                    didi_graph,
+                    drug_view_graphs,
+                    disease_view_graphs,
                     drdipr_graph,
                     drug_feature,
                     disease_feature,
