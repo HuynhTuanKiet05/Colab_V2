@@ -22,6 +22,7 @@ from AMDGT_original.data_preprocess import (
 )
 from metric import get_metric
 from model.improved.tmc_rvg_model import TMC_AMDGT_RVG
+from similarity_fusion_improved import collect_similarity_views, repair_similarity_views
 from topology_features_improved import extract_topology_features
 
 
@@ -80,9 +81,40 @@ def normalize_prior_matrix(matrix):
     return matrix / matrix.max().clamp_min(1e-6)
 
 
+def prepare_similarity_tensor(matrix):
+    similarity = torch.as_tensor(matrix, dtype=torch.float32)
+    similarity = 0.5 * (similarity + similarity.T)
+    similarity.fill_diagonal_(0.0)
+    return similarity
+
+
 def positive_training_edges(x_train, y_train):
     labels = np.asarray(y_train).reshape(-1).astype(int)
     return np.asarray(x_train)[labels == 1]
+
+
+def build_multiview_collab_prior(data, train_drdi, args):
+    drug_views = [prepare_similarity_tensor(matrix) for matrix in collect_similarity_views(data, 'drug')]
+    disease_views = [prepare_similarity_tensor(matrix) for matrix in collect_similarity_views(data, 'disease')]
+
+    disease_pos_counts = train_drdi.sum(dim=0, keepdim=True).clamp_min(1.0)
+    drug_pos_counts = train_drdi.sum(dim=1, keepdim=True).clamp_min(1.0)
+
+    support_views = []
+    for drug_similarity in drug_views:
+        support_views.append((drug_similarity @ train_drdi) / disease_pos_counts)
+    for disease_similarity in disease_views:
+        support_views.append((train_drdi @ disease_similarity) / drug_pos_counts)
+
+    stacked = torch.stack(support_views, dim=0)
+    mean_support = stacked.mean(dim=0)
+    if stacked.shape[0] == 1:
+        return normalize_prior_matrix(mean_support)
+
+    agreement = 1.0 - normalize_prior_matrix(stacked.std(dim=0, unbiased=False))
+    return normalize_prior_matrix(
+        (1.0 - args.prior_view_agreement_weight) * mean_support + args.prior_view_agreement_weight * agreement
+    )
 
 
 def build_path_prior(data, train_positive_edges, args):
@@ -113,16 +145,7 @@ def build_path_prior(data, train_positive_edges, args):
     degree_mix = torch.sqrt((drug_deg + 1.0) * (disease_deg + 1.0))
     degree_norm = normalize_prior_matrix(degree_mix)
 
-    drug_similarity = torch.as_tensor(data['drs'], dtype=torch.float32)
-    disease_similarity = torch.as_tensor(data['dis'], dtype=torch.float32)
-    drug_similarity.fill_diagonal_(0.0)
-    disease_similarity.fill_diagonal_(0.0)
-
-    disease_pos_counts = train_drdi.sum(dim=0, keepdim=True).clamp_min(1.0)
-    drug_pos_counts = train_drdi.sum(dim=1, keepdim=True).clamp_min(1.0)
-    drug_support = (drug_similarity @ train_drdi) / disease_pos_counts
-    disease_support = (train_drdi @ disease_similarity) / drug_pos_counts
-    collab_norm = normalize_prior_matrix(0.5 * (drug_support + disease_support))
+    collab_norm = build_multiview_collab_prior(data, train_drdi, args)
 
     train_assoc_norm = normalize_prior_matrix(train_drdi) if train_drdi.max() > 0 else train_drdi
     indirect_prior = normalize_prior_matrix(0.50 * shared_norm + 0.35 * collab_norm + 0.15 * degree_norm)
@@ -132,12 +155,15 @@ def build_path_prior(data, train_positive_edges, args):
     return indirect_prior, train_prior
 
 
-def gather_pair_bias(pair_index, prior_matrix, device, scale=0.22):
+def gather_pair_values(pair_index, value_matrix, device):
     idx = pair_index.long().detach().cpu().clone()
-    idx[:, 0] = idx[:, 0].clamp(0, prior_matrix.shape[0] - 1)
-    idx[:, 1] = idx[:, 1].clamp(0, prior_matrix.shape[1] - 1)
-    bias = prior_matrix[idx[:, 0], idx[:, 1]].to(device)
-    return scale * bias.unsqueeze(-1)
+    idx[:, 0] = idx[:, 0].clamp(0, value_matrix.shape[0] - 1)
+    idx[:, 1] = idx[:, 1].clamp(0, value_matrix.shape[1] - 1)
+    return value_matrix[idx[:, 0], idx[:, 1]].to(device).unsqueeze(-1)
+
+
+def gather_pair_bias(pair_index, prior_matrix, device, scale=0.22):
+    return scale * gather_pair_values(pair_index, prior_matrix, device)
 
 
 def contrastive_weight_for_epoch(epoch, args):
@@ -184,11 +210,80 @@ def aux_loss_weights(epoch, args):
     return ranking, hard_neg
 
 
-def focal_classification_loss(logits, targets, class_weights, gamma):
+def classification_phase(epoch, args):
+    if epoch + 1 <= args.aux_warmup_epochs:
+        return {
+            'hard_negative': 0.0,
+            'hard_positive': 0.0,
+            'prior_hardness': 0.0,
+            'label_smoothing': args.label_smoothing,
+        }
+
+    progress = (epoch + 1 - args.aux_warmup_epochs) / max(1, args.epochs - args.aux_warmup_epochs)
+    ramp = min(max(progress, 0.0), 1.0)
+    train_progress = (epoch + 1) / max(1, args.epochs)
+    if train_progress < 0.75:
+        label_smoothing = args.label_smoothing
+    elif train_progress < 0.90:
+        label_smoothing = max(args.label_smoothing * 0.5, 0.001)
+    else:
+        label_smoothing = 0.0
+
+    return {
+        'hard_negative': args.ce_hard_negative_weight * (0.15 + 0.85 * ramp),
+        'hard_positive': args.ce_hard_positive_weight * (0.15 + 0.85 * ramp),
+        'prior_hardness': args.prior_hardness_weight * (0.15 + 0.85 * ramp),
+        'label_smoothing': label_smoothing,
+    }
+
+
+def build_sample_weights(
+    logits,
+    targets,
+    hard_negative_weight=0.0,
+    hard_positive_weight=0.0,
+    pair_prior=None,
+    prior_hardness_weight=0.0,
+):
+    probs = fn.softmax(logits.detach(), dim=-1)[:, 1]
+    sample_weights = torch.ones_like(probs)
+    negative_mask = targets == 0
+    positive_mask = targets == 1
+
+    if hard_negative_weight > 0:
+        sample_weights[negative_mask] = sample_weights[negative_mask] + hard_negative_weight * probs[negative_mask]
+    if hard_positive_weight > 0:
+        sample_weights[positive_mask] = sample_weights[positive_mask] + hard_positive_weight * (1.0 - probs[positive_mask])
+    if pair_prior is not None and prior_hardness_weight > 0:
+        prior = pair_prior.detach().reshape(-1).clamp(0.0, 1.0)
+        sample_weights[negative_mask] = sample_weights[negative_mask] + prior_hardness_weight * prior[negative_mask]
+        sample_weights[positive_mask] = sample_weights[positive_mask] + prior_hardness_weight * (1.0 - prior[positive_mask])
+
+    # Re-center the weights so we emphasize harder pairs without silently inflating the total loss scale.
+    return sample_weights / sample_weights.mean().clamp_min(1e-6)
+
+
+def weighted_cross_entropy_loss(logits, targets, class_weights, label_smoothing, sample_weights=None):
+    loss = fn.cross_entropy(
+        logits,
+        targets,
+        reduction='none',
+        weight=class_weights,
+        label_smoothing=label_smoothing,
+    )
+    if sample_weights is not None:
+        loss = loss * sample_weights
+    return loss.mean()
+
+
+def focal_classification_loss(logits, targets, class_weights, gamma, sample_weights=None):
     base_ce = fn.cross_entropy(logits, targets, reduction='none')
     weighted_ce = fn.cross_entropy(logits, targets, reduction='none', weight=class_weights)
     pt = torch.exp(-base_ce)
-    return (((1.0 - pt) ** gamma) * weighted_ce).mean()
+    loss = ((1.0 - pt) ** gamma) * weighted_ce
+    if sample_weights is not None:
+        loss = loss * sample_weights
+    return loss.mean()
 
 
 def focal_weight_for_epoch(epoch, args):
@@ -274,6 +369,8 @@ if __name__ == '__main__':
     parser.add_argument('--pair_decoder', choices=['hybrid_ensemble', 'hybrid_mlp', 'elementwise'], default='hybrid_ensemble')
     parser.add_argument('--path_bias_scale', type=float, default=0.18)
     parser.add_argument('--direct_train_prior_weight', type=float, default=0.18)
+    parser.add_argument('--similarity_fusion', choices=['nonzero_mean', 'mean', 'legacy'], default='nonzero_mean')
+    parser.add_argument('--prior_view_agreement_weight', type=float, default=0.15)
     parser.add_argument('--eval_path_bias', action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--aux_warmup_epochs', type=int, default=180)
     parser.add_argument('--ranking_weight', type=float, default=0.06)
@@ -282,6 +379,9 @@ if __name__ == '__main__':
     parser.add_argument('--hard_negative_weight', type=float, default=0.04)
     parser.add_argument('--hard_negative_ratio', type=float, default=0.15)
     parser.add_argument('--hard_negative_margin', type=float, default=0.10)
+    parser.add_argument('--ce_hard_negative_weight', type=float, default=0.25)
+    parser.add_argument('--ce_hard_positive_weight', type=float, default=0.10)
+    parser.add_argument('--prior_hardness_weight', type=float, default=0.12)
     parser.add_argument('--focal_weight', type=float, default=0.05)
     parser.add_argument('--focal_gamma', type=float, default=1.4)
     parser.add_argument('--focal_start_epoch', type=int, default=220)
@@ -295,6 +395,10 @@ if __name__ == '__main__':
     apply_dataset_preset(args)
     args.direct_train_prior_weight = min(max(args.direct_train_prior_weight, 0.0), 1.0)
     args.cl_min_scale = min(max(args.cl_min_scale, 0.0), 1.0)
+    args.prior_view_agreement_weight = min(max(args.prior_view_agreement_weight, 0.0), 1.0)
+    args.ce_hard_negative_weight = max(args.ce_hard_negative_weight, 0.0)
+    args.ce_hard_positive_weight = max(args.ce_hard_positive_weight, 0.0)
+    args.prior_hardness_weight = max(args.prior_hardness_weight, 0.0)
     args.topo_feat_dim = 7
     args.device = resolve_device(args.device)
     set_seed(args.random_seed)
@@ -311,6 +415,7 @@ if __name__ == '__main__':
     args.protein_number = data['protein_number']
 
     data = data_processing(data, args)
+    data = repair_similarity_views(data, mode=args.similarity_fusion)
     data = k_fold(data, args)
 
     if args.fold_indices is None:
@@ -355,7 +460,6 @@ if __name__ == '__main__':
         n_pos = torch.sum(y_train).item()
         n_neg = y_train.numel() - n_pos
         class_weights = torch.tensor([1.0, max(n_neg / max(n_pos, 1.0), 1.0)], device=args.device)
-        cross_entropy = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=args.label_smoothing)
 
         drdipr_graph, data = dgl_heterograph(data, data['X_train'][fold_idx], args)
         drdipr_graph = drdipr_graph.to(args.device)
@@ -375,8 +479,10 @@ if __name__ == '__main__':
             cl_weight = contrastive_weight_for_epoch(epoch, args)
             ranking_weight, hard_neg_weight = aux_loss_weights(epoch, args)
             focal_weight = focal_weight_for_epoch(epoch, args)
+            classification_cfg = classification_phase(epoch, args)
+            train_pair_prior = gather_pair_values(x_train, train_prior, args.device)
             train_edge_stats = {
-                'pair_bias': gather_pair_bias(x_train, train_prior, args.device, scale=args.path_bias_scale)
+                'pair_bias': args.path_bias_scale * train_pair_prior
             }
             _, train_score, cl_loss = model(
                 drdr_graph,
@@ -390,12 +496,32 @@ if __name__ == '__main__':
                 x_train,
                 edge_stats=train_edge_stats,
             )
-            ce_loss = cross_entropy(train_score, y_train)
+            sample_weights = build_sample_weights(
+                train_score,
+                y_train,
+                hard_negative_weight=classification_cfg['hard_negative'],
+                hard_positive_weight=classification_cfg['hard_positive'],
+                pair_prior=train_pair_prior,
+                prior_hardness_weight=classification_cfg['prior_hardness'],
+            )
+            ce_loss = weighted_cross_entropy_loss(
+                train_score,
+                y_train,
+                class_weights,
+                classification_cfg['label_smoothing'],
+                sample_weights=sample_weights,
+            )
             ranking_loss = pair_ranking_loss(train_score, y_train, args.ranking_margin, args.ranking_samples)
             hard_neg_loss = hard_negative_mining_loss(
                 train_score, y_train, top_ratio=args.hard_negative_ratio, margin=args.hard_negative_margin
             )
-            focal_loss = focal_classification_loss(train_score, y_train, class_weights, args.focal_gamma)
+            focal_loss = focal_classification_loss(
+                train_score,
+                y_train,
+                class_weights,
+                args.focal_gamma,
+                sample_weights=sample_weights,
+            )
             train_loss = (
                 ce_loss
                 + cl_weight * cl_loss

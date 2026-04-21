@@ -317,7 +317,8 @@ class TMC_AMDGT_RVG(nn.Module):
             if pair_bias is not None:
                 elementwise_logits = elementwise_logits + torch.cat([torch.zeros_like(pair_bias), pair_bias], dim=-1)
             hybrid_logits = self.hybrid_pair_decoder(pair_drug, pair_disease, topology_score=topology_score, pair_bias=pair_bias)
-            gate = self.ensemble_gate(pair_mul, pair_diff, pair_sum, pair_dot, pair_cos, topology_score)
+            gate_topology = topology_score if pair_bias is None else topology_score + pair_bias
+            gate = self.ensemble_gate(pair_mul, pair_diff, pair_sum, pair_dot, pair_cos, gate_topology)
             output = gate * hybrid_logits + (1.0 - gate) * elementwise_logits
         else:
             output = self.hybrid_pair_decoder(pair_drug, pair_disease, topology_score=topology_score, pair_bias=pair_bias)

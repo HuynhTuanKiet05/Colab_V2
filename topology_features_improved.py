@@ -49,9 +49,10 @@ def _association_degree(associations, num_entities, entity_col):
 def extract_topology_features(data, args, force_recompute=False):
     cache_dir = os.path.join(args.data_dir, 'topology_cache')
     os.makedirs(cache_dir, exist_ok=True)
+    cache_tag = getattr(args, 'topology_cache_tag', 'simfix_v1')
 
-    drug_cache = os.path.join(cache_dir, f'drug_topo_k{args.neighbor}_n{args.drug_number}.pt')
-    disease_cache = os.path.join(cache_dir, f'disease_topo_k{args.neighbor}_n{args.disease_number}.pt')
+    drug_cache = os.path.join(cache_dir, f'drug_topo_{cache_tag}_k{args.neighbor}_n{args.drug_number}.pt')
+    disease_cache = os.path.join(cache_dir, f'disease_topo_{cache_tag}_k{args.neighbor}_n{args.disease_number}.pt')
 
     if not force_recompute and os.path.exists(drug_cache) and os.path.exists(disease_cache):
         drug_topo = torch.load(drug_cache, weights_only=False)
