@@ -206,9 +206,17 @@ Day la huong tham khao tu do an ban cua ban: giu backbone AMDGT, bo sung topolog
   --path_bias_scale 0.18 \
   --direct_train_prior_weight 0.18 \
   --no-eval_path_bias \
+  --aux_warmup_epochs 180 \
+  --ranking_weight 0.06 \
+  --ranking_margin 0.18 \
+  --ranking_samples 2048 \
+  --hard_negative_weight 0.04 \
+  --hard_negative_ratio 0.15 \
+  --hard_negative_margin 0.10 \
   --label_smoothing 0.01 \
   --grad_clip 5.0 \
-  --ema_decay 0.995
+  --ema_decay 0.995 \
+  --log_best_only
 ```
 
 Ket qua full 10-fold se duoc ghi ra:
@@ -306,9 +314,17 @@ Neu muon chay rieng fold yeu theo huong TMC-RVG:
   --path_bias_scale 0.18 \
   --direct_train_prior_weight 0.18 \
   --no-eval_path_bias \
+  --aux_warmup_epochs 180 \
+  --ranking_weight 0.06 \
+  --ranking_margin 0.18 \
+  --ranking_samples 2048 \
+  --hard_negative_weight 0.04 \
+  --hard_negative_ratio 0.15 \
+  --hard_negative_margin 0.10 \
   --label_smoothing 0.01 \
   --grad_clip 5.0 \
-  --ema_decay 0.995
+  --ema_decay 0.995 \
+  --log_best_only
 ```
 
 ## 7. Luu ket qua len Google Drive

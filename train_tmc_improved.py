@@ -148,6 +148,42 @@ def contrastive_weight_for_epoch(epoch, args):
     return args.lambda_cl * (args.cl_min_scale + (1.0 - args.cl_min_scale) * decay)
 
 
+def pair_ranking_loss(logits, targets, margin, max_pairs):
+    probs = fn.softmax(logits, dim=-1)[:, 1]
+    pos_scores = probs[targets == 1]
+    neg_scores = probs[targets == 0]
+    if pos_scores.numel() == 0 or neg_scores.numel() == 0:
+        return logits.new_tensor(0.0)
+
+    sample_count = min(int(max_pairs), pos_scores.numel(), neg_scores.numel())
+    pos_idx = torch.randperm(pos_scores.numel(), device=logits.device)[:sample_count]
+    neg_idx = torch.randperm(neg_scores.numel(), device=logits.device)[:sample_count]
+    return torch.relu(margin - pos_scores[pos_idx] + neg_scores[neg_idx]).mean()
+
+
+def hard_negative_mining_loss(logits, targets, top_ratio=0.15, margin=0.12):
+    probs = fn.softmax(logits, dim=-1)[:, 1]
+    pos_scores = probs[targets == 1]
+    neg_scores = probs[targets == 0]
+    if pos_scores.numel() == 0 or neg_scores.numel() == 0:
+        return logits.new_tensor(0.0)
+
+    top_k = max(1, int(top_ratio * neg_scores.numel()))
+    hard_neg, _ = torch.topk(neg_scores, k=min(top_k, neg_scores.numel()))
+    pos_ref = pos_scores.mean()
+    return torch.relu(margin + hard_neg - pos_ref).mean()
+
+
+def aux_loss_weights(epoch, args):
+    if epoch + 1 <= args.aux_warmup_epochs:
+        return 0.0, 0.0
+    progress = (epoch + 1 - args.aux_warmup_epochs) / max(1, args.epochs - args.aux_warmup_epochs)
+    ramp = min(max(progress, 0.0), 1.0)
+    ranking = args.ranking_weight * (0.20 + 0.80 * ramp)
+    hard_neg = args.hard_negative_weight * (0.15 + 0.85 * ramp)
+    return ranking, hard_neg
+
+
 def build_results_dataframe(fold_metrics, fold_ids=None):
     columns = ['Fold', 'Best_Epoch', 'AUC', 'AUPR', 'Accuracy', 'Precision', 'Recall', 'F1-score', 'Mcc']
     if fold_ids is None:
@@ -224,9 +260,17 @@ if __name__ == '__main__':
     parser.add_argument('--path_bias_scale', type=float, default=0.18)
     parser.add_argument('--direct_train_prior_weight', type=float, default=0.18)
     parser.add_argument('--eval_path_bias', action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument('--aux_warmup_epochs', type=int, default=180)
+    parser.add_argument('--ranking_weight', type=float, default=0.06)
+    parser.add_argument('--ranking_margin', type=float, default=0.18)
+    parser.add_argument('--ranking_samples', type=int, default=2048)
+    parser.add_argument('--hard_negative_weight', type=float, default=0.04)
+    parser.add_argument('--hard_negative_ratio', type=float, default=0.15)
+    parser.add_argument('--hard_negative_margin', type=float, default=0.10)
     parser.add_argument('--label_smoothing', type=float, default=0.01)
     parser.add_argument('--grad_clip', type=float, default=5.0)
     parser.add_argument('--ema_decay', type=float, default=0.995)
+    parser.add_argument('--log_best_only', action=argparse.BooleanOptionalAction, default=True)
 
     args = parser.parse_args()
     apply_dataset_preset(args)
@@ -309,6 +353,7 @@ if __name__ == '__main__':
         for epoch in range(args.epochs):
             model.train()
             cl_weight = contrastive_weight_for_epoch(epoch, args)
+            ranking_weight, hard_neg_weight = aux_loss_weights(epoch, args)
             train_edge_stats = {
                 'pair_bias': gather_pair_bias(x_train, train_prior, args.device, scale=args.path_bias_scale)
             }
@@ -325,7 +370,11 @@ if __name__ == '__main__':
                 edge_stats=train_edge_stats,
             )
             ce_loss = cross_entropy(train_score, y_train)
-            train_loss = ce_loss + cl_weight * cl_loss
+            ranking_loss = pair_ranking_loss(train_score, y_train, args.ranking_margin, args.ranking_samples)
+            hard_neg_loss = hard_negative_mining_loss(
+                train_score, y_train, top_ratio=args.hard_negative_ratio, margin=args.hard_negative_margin
+            )
+            train_loss = ce_loss + cl_weight * cl_loss + ranking_weight * ranking_loss + hard_neg_weight * hard_neg_loss
 
             optimizer.zero_grad()
             train_loss.backward()
@@ -380,12 +429,13 @@ if __name__ == '__main__':
 
             elapsed = timeit.default_timer() - global_start
             best_mark = ' [BEST]' if abs(auc - best_auc) < 1e-12 else ''
-            print(
-                f'Epoch {epoch + 1:4d} | {elapsed:7.2f}s | '
-                f'AUC {auc:.5f} | AUPR {aupr:.5f} | ACC {accuracy:.5f} | '
-                f'P {precision:.5f} | R {recall:.5f} | F1 {f1:.5f} | MCC {mcc:.5f}'
-                f'{best_mark} | NO_IMPROVE {no_improve_epochs}'
-            )
+            if (not args.log_best_only) or best_mark:
+                print(
+                    f'Epoch {epoch + 1:4d} | {elapsed:7.2f}s | '
+                    f'AUC {auc:.5f} | AUPR {aupr:.5f} | ACC {accuracy:.5f} | '
+                    f'P {precision:.5f} | R {recall:.5f} | F1 {f1:.5f} | MCC {mcc:.5f}'
+                    f'{best_mark} | NO_IMPROVE {no_improve_epochs}'
+                )
 
         if best_metrics is None:
             raise RuntimeError(f'No evaluation executed for fold {fold_idx}; check score_every/epochs.')
