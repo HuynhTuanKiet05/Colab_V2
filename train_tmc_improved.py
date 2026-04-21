@@ -289,6 +289,7 @@ if __name__ == '__main__':
     parser.add_argument('--grad_clip', type=float, default=5.0)
     parser.add_argument('--ema_decay', type=float, default=0.995)
     parser.add_argument('--log_best_only', action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument('--display_best_delta', type=float, default=0.001, help='minimum AUC gain required before printing a new BEST line')
 
     args = parser.parse_args()
     apply_dataset_preset(args)
@@ -365,6 +366,7 @@ if __name__ == '__main__':
 
         best_metrics = None
         best_auc = -1.0
+        displayed_best_auc = -1.0
         no_improve_epochs = 0
         ema_state_dict = None
 
@@ -459,7 +461,15 @@ if __name__ == '__main__':
 
             elapsed = timeit.default_timer() - global_start
             best_mark = ' [BEST]' if abs(auc - best_auc) < 1e-12 else ''
-            if (not args.log_best_only) or best_mark:
+            should_print_best = False
+            if best_mark:
+                if displayed_best_auc < 0:
+                    should_print_best = True
+                elif auc >= displayed_best_auc + args.display_best_delta - 1e-12:
+                    should_print_best = True
+                if should_print_best:
+                    displayed_best_auc = auc
+            if (not args.log_best_only) or should_print_best:
                 print(
                     f'Epoch {epoch + 1:4d} | {elapsed:7.2f}s | '
                     f'AUC {auc:.5f} | AUPR {aupr:.5f} | ACC {accuracy:.5f} | '

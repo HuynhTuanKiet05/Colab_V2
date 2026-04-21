@@ -219,6 +219,7 @@ Day la huong tham khao tu do an ban cua ban: giu backbone AMDGT, bo sung topolog
   --label_smoothing 0.01 \
   --grad_clip 5.0 \
   --ema_decay 0.995 \
+  --display_best_delta 0.001 \
   --log_best_only
 ```
 
@@ -330,6 +331,7 @@ Neu muon chay rieng fold yeu theo huong TMC-RVG:
   --label_smoothing 0.01 \
   --grad_clip 5.0 \
   --ema_decay 0.995 \
+  --display_best_delta 0.001 \
   --log_best_only
 ```
 
