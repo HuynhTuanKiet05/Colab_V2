@@ -114,6 +114,23 @@ class HybridPairDecoder(nn.Module):
         return self.bilinear(drug_repr, disease_repr) + self.skip(pair_mul) + self.decoder(features)
 
 
+class PairEnsembleGate(nn.Module):
+    def __init__(self, dim, dropout=0.2):
+        super().__init__()
+        hidden = max(dim, 256)
+        self.gate = nn.Sequential(
+            nn.LayerNorm(dim * 3 + 3),
+            nn.Linear(dim * 3 + 3, hidden),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, pair_mul, pair_diff, pair_sum, pair_dot, pair_cos, topology_score):
+        features = torch.cat([pair_mul, pair_diff, pair_sum, pair_dot, pair_cos, topology_score], dim=-1)
+        return torch.sigmoid(self.gate(features))
+
+
 class TMC_AMDGT_RVG(nn.Module):
     def __init__(self, args):
         super().__init__()
@@ -216,8 +233,9 @@ class TMC_AMDGT_RVG(nn.Module):
             nn.Dropout(0.4),
             nn.Linear(256, 2),
         )
-        self.pair_decoder = getattr(args, 'pair_decoder', 'hybrid_mlp')
+        self.pair_decoder = getattr(args, 'pair_decoder', 'hybrid_ensemble')
         self.hybrid_pair_decoder = HybridPairDecoder(base_dim, dropout=args.dropout)
+        self.ensemble_gate = PairEnsembleGate(base_dim, dropout=args.dropout)
         self.pair_topology = nn.Sequential(
             nn.Linear(base_dim * 2, base_dim),
             nn.GELU(),
@@ -284,11 +302,23 @@ class TMC_AMDGT_RVG(nn.Module):
         if edge_stats is not None:
             pair_bias = edge_stats.get('pair_bias')
 
+        pair_mul = torch.mul(pair_drug, pair_disease)
+        pair_diff = torch.abs(pair_drug - pair_disease)
+        pair_sum = pair_drug + pair_disease
+        pair_dot = (pair_drug * pair_disease).sum(dim=-1, keepdim=True)
+        pair_cos = fn.cosine_similarity(pair_drug, pair_disease, dim=-1).unsqueeze(-1)
+
         if self.pair_decoder == 'elementwise':
-            pair_embedding = torch.mul(pair_drug, pair_disease)
-            output = self.elementwise_mlp(pair_embedding)
+            output = self.elementwise_mlp(pair_mul)
             if pair_bias is not None:
                 output = output + torch.cat([torch.zeros_like(pair_bias), pair_bias], dim=-1)
+        elif self.pair_decoder == 'hybrid_ensemble':
+            elementwise_logits = self.elementwise_mlp(pair_mul)
+            if pair_bias is not None:
+                elementwise_logits = elementwise_logits + torch.cat([torch.zeros_like(pair_bias), pair_bias], dim=-1)
+            hybrid_logits = self.hybrid_pair_decoder(pair_drug, pair_disease, topology_score=topology_score, pair_bias=pair_bias)
+            gate = self.ensemble_gate(pair_mul, pair_diff, pair_sum, pair_dot, pair_cos, topology_score)
+            output = gate * hybrid_logits + (1.0 - gate) * elementwise_logits
         else:
             output = self.hybrid_pair_decoder(pair_drug, pair_disease, topology_score=topology_score, pair_bias=pair_bias)
 

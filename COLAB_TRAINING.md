@@ -202,7 +202,7 @@ Day la huong tham khao tu do an ban cua ban: giu backbone AMDGT, bo sung topolog
   --topo_hidden 128 \
   --gate_mode vector \
   --gate_bias_init -2.0 \
-  --pair_decoder hybrid_mlp \
+  --pair_decoder hybrid_ensemble \
   --path_bias_scale 0.18 \
   --direct_train_prior_weight 0.18 \
   --no-eval_path_bias \
@@ -213,6 +213,9 @@ Day la huong tham khao tu do an ban cua ban: giu backbone AMDGT, bo sung topolog
   --hard_negative_weight 0.04 \
   --hard_negative_ratio 0.15 \
   --hard_negative_margin 0.10 \
+  --focal_weight 0.05 \
+  --focal_gamma 1.4 \
+  --focal_start_epoch 220 \
   --label_smoothing 0.01 \
   --grad_clip 5.0 \
   --ema_decay 0.995 \
@@ -310,7 +313,7 @@ Neu muon chay rieng fold yeu theo huong TMC-RVG:
   --topo_hidden 128 \
   --gate_mode vector \
   --gate_bias_init -2.0 \
-  --pair_decoder hybrid_mlp \
+  --pair_decoder hybrid_ensemble \
   --path_bias_scale 0.18 \
   --direct_train_prior_weight 0.18 \
   --no-eval_path_bias \
@@ -321,6 +324,9 @@ Neu muon chay rieng fold yeu theo huong TMC-RVG:
   --hard_negative_weight 0.04 \
   --hard_negative_ratio 0.15 \
   --hard_negative_margin 0.10 \
+  --focal_weight 0.05 \
+  --focal_gamma 1.4 \
+  --focal_start_epoch 220 \
   --label_smoothing 0.01 \
   --grad_clip 5.0 \
   --ema_decay 0.995 \

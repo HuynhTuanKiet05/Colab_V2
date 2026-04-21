@@ -184,6 +184,21 @@ def aux_loss_weights(epoch, args):
     return ranking, hard_neg
 
 
+def focal_classification_loss(logits, targets, class_weights, gamma):
+    base_ce = fn.cross_entropy(logits, targets, reduction='none')
+    weighted_ce = fn.cross_entropy(logits, targets, reduction='none', weight=class_weights)
+    pt = torch.exp(-base_ce)
+    return (((1.0 - pt) ** gamma) * weighted_ce).mean()
+
+
+def focal_weight_for_epoch(epoch, args):
+    if epoch + 1 <= args.focal_start_epoch:
+        return 0.0
+    progress = (epoch + 1 - args.focal_start_epoch) / max(1, args.epochs - args.focal_start_epoch)
+    ramp = min(max(progress, 0.0), 1.0)
+    return args.focal_weight * (0.15 + 0.85 * ramp)
+
+
 def build_results_dataframe(fold_metrics, fold_ids=None):
     columns = ['Fold', 'Best_Epoch', 'AUC', 'AUPR', 'Accuracy', 'Precision', 'Recall', 'F1-score', 'Mcc']
     if fold_ids is None:
@@ -256,7 +271,7 @@ if __name__ == '__main__':
     parser.add_argument('--topo_hidden', type=int, default=128)
     parser.add_argument('--gate_mode', choices=['scalar', 'vector'], default='vector')
     parser.add_argument('--gate_bias_init', type=float, default=-2.0)
-    parser.add_argument('--pair_decoder', choices=['hybrid_mlp', 'elementwise'], default='hybrid_mlp')
+    parser.add_argument('--pair_decoder', choices=['hybrid_ensemble', 'hybrid_mlp', 'elementwise'], default='hybrid_ensemble')
     parser.add_argument('--path_bias_scale', type=float, default=0.18)
     parser.add_argument('--direct_train_prior_weight', type=float, default=0.18)
     parser.add_argument('--eval_path_bias', action=argparse.BooleanOptionalAction, default=False)
@@ -267,6 +282,9 @@ if __name__ == '__main__':
     parser.add_argument('--hard_negative_weight', type=float, default=0.04)
     parser.add_argument('--hard_negative_ratio', type=float, default=0.15)
     parser.add_argument('--hard_negative_margin', type=float, default=0.10)
+    parser.add_argument('--focal_weight', type=float, default=0.05)
+    parser.add_argument('--focal_gamma', type=float, default=1.4)
+    parser.add_argument('--focal_start_epoch', type=int, default=220)
     parser.add_argument('--label_smoothing', type=float, default=0.01)
     parser.add_argument('--grad_clip', type=float, default=5.0)
     parser.add_argument('--ema_decay', type=float, default=0.995)
@@ -354,6 +372,7 @@ if __name__ == '__main__':
             model.train()
             cl_weight = contrastive_weight_for_epoch(epoch, args)
             ranking_weight, hard_neg_weight = aux_loss_weights(epoch, args)
+            focal_weight = focal_weight_for_epoch(epoch, args)
             train_edge_stats = {
                 'pair_bias': gather_pair_bias(x_train, train_prior, args.device, scale=args.path_bias_scale)
             }
@@ -374,7 +393,14 @@ if __name__ == '__main__':
             hard_neg_loss = hard_negative_mining_loss(
                 train_score, y_train, top_ratio=args.hard_negative_ratio, margin=args.hard_negative_margin
             )
-            train_loss = ce_loss + cl_weight * cl_loss + ranking_weight * ranking_loss + hard_neg_weight * hard_neg_loss
+            focal_loss = focal_classification_loss(train_score, y_train, class_weights, args.focal_gamma)
+            train_loss = (
+                ce_loss
+                + cl_weight * cl_loss
+                + ranking_weight * ranking_loss
+                + hard_neg_weight * hard_neg_loss
+                + focal_weight * focal_loss
+            )
 
             optimizer.zero_grad()
             train_loss.backward()
@@ -417,7 +443,11 @@ if __name__ == '__main__':
             test_pred = torch.argmax(test_score, dim=-1).cpu().numpy()
             auc, aupr, accuracy, precision, recall, f1, mcc = get_metric(y_test, test_pred, test_prob)
 
-            if auc > best_auc + 1e-6:
+            if (auc > best_auc + 1e-6) or (
+                abs(auc - best_auc) <= 1e-6 and best_metrics is not None and aupr > best_metrics[1] + 1e-6
+            ) or (
+                abs(auc - best_auc) <= 1e-6 and best_metrics is None
+            ):
                 best_auc = auc
                 no_improve_epochs = 0
                 best_metrics = (auc, aupr, accuracy, precision, recall, f1, mcc, epoch + 1)
