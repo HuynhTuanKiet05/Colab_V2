@@ -88,9 +88,46 @@ def prepare_similarity_tensor(matrix):
     return similarity
 
 
+def build_similarity_regularizer(graph, similarity_matrix, device):
+    src, dst = graph.edges()
+    src = src.to(device)
+    dst = dst.to(device)
+    mask = src != dst
+    src = src[mask]
+    dst = dst[mask]
+    weights = similarity_matrix[src, dst]
+    weights = normalize_prior_matrix(weights)
+    return src, dst, weights
+
+
+def graph_smoothness_loss(embeddings, regularizer_data, max_edges=None):
+    src, dst, weights = regularizer_data
+    if src.numel() == 0:
+        return embeddings.new_tensor(0.0)
+    if max_edges is not None and src.numel() > max_edges:
+        idx = torch.randperm(src.numel(), device=embeddings.device)[:max_edges]
+        src = src[idx]
+        dst = dst[idx]
+        weights = weights[idx]
+    diff = (embeddings[src] - embeddings[dst]).pow(2).mean(dim=-1)
+    return (diff * (0.25 + 0.75 * weights)).mean()
+
+
 def positive_training_edges(x_train, y_train):
     labels = np.asarray(y_train).reshape(-1).astype(int)
     return np.asarray(x_train)[labels == 1]
+
+
+def positive_pair_topology_loss(drug_repr, disease_repr, positive_edges, max_pairs=None):
+    if positive_edges.numel() == 0:
+        return drug_repr.new_tensor(0.0)
+    if max_pairs is not None and positive_edges.shape[0] > max_pairs:
+        idx = torch.randperm(positive_edges.shape[0], device=positive_edges.device)[:max_pairs]
+        positive_edges = positive_edges[idx]
+    drug_nodes = drug_repr[positive_edges[:, 0]]
+    disease_nodes = disease_repr[positive_edges[:, 1]]
+    cosine = fn.cosine_similarity(drug_nodes, disease_nodes, dim=-1)
+    return (1.0 - cosine).mean()
 
 
 def build_multiview_collab_prior(data, train_drdi, args):
@@ -208,6 +245,16 @@ def aux_loss_weights(epoch, args):
     ranking = args.ranking_weight * (0.20 + 0.80 * ramp)
     hard_neg = args.hard_negative_weight * (0.15 + 0.85 * ramp)
     return ranking, hard_neg
+
+
+def structure_loss_weights(epoch, args):
+    if epoch + 1 <= args.aux_warmup_epochs:
+        return 0.0, 0.0
+    progress = (epoch + 1 - args.aux_warmup_epochs) / max(1, args.epochs - args.aux_warmup_epochs)
+    ramp = min(max(progress, 0.0), 1.0)
+    topology = args.topology_reg_weight * (0.20 + 0.80 * ramp)
+    positive = args.positive_pair_reg_weight * (0.15 + 0.85 * ramp)
+    return topology, positive
 
 
 def classification_phase(epoch, args):
@@ -382,6 +429,10 @@ if __name__ == '__main__':
     parser.add_argument('--ce_hard_negative_weight', type=float, default=0.25)
     parser.add_argument('--ce_hard_positive_weight', type=float, default=0.10)
     parser.add_argument('--prior_hardness_weight', type=float, default=0.12)
+    parser.add_argument('--topology_reg_weight', type=float, default=0.006)
+    parser.add_argument('--positive_pair_reg_weight', type=float, default=0.012)
+    parser.add_argument('--reg_edge_samples', type=int, default=12000)
+    parser.add_argument('--reg_positive_samples', type=int, default=2048)
     parser.add_argument('--focal_weight', type=float, default=0.05)
     parser.add_argument('--focal_gamma', type=float, default=1.4)
     parser.add_argument('--focal_start_epoch', type=int, default=220)
@@ -399,6 +450,8 @@ if __name__ == '__main__':
     args.ce_hard_negative_weight = max(args.ce_hard_negative_weight, 0.0)
     args.ce_hard_positive_weight = max(args.ce_hard_positive_weight, 0.0)
     args.prior_hardness_weight = max(args.prior_hardness_weight, 0.0)
+    args.topology_reg_weight = max(args.topology_reg_weight, 0.0)
+    args.positive_pair_reg_weight = max(args.positive_pair_reg_weight, 0.0)
     args.topo_feat_dim = 7
     args.device = resolve_device(args.device)
     set_seed(args.random_seed)
@@ -429,6 +482,10 @@ if __name__ == '__main__':
     drdr_graph, didi_graph, data = dgl_similarity_graph(data, args)
     drdr_graph = drdr_graph.to(args.device)
     didi_graph = didi_graph.to(args.device)
+    drug_similarity_matrix = prepare_similarity_tensor(data['drs']).to(args.device)
+    disease_similarity_matrix = prepare_similarity_tensor(data['dis']).to(args.device)
+    drug_similarity_reg = build_similarity_regularizer(drdr_graph, drug_similarity_matrix, args.device)
+    disease_similarity_reg = build_similarity_regularizer(didi_graph, disease_similarity_matrix, args.device)
 
     drug_topo_feat, disease_topo_feat = extract_topology_features(data, args)
     drug_topo_feat = drug_topo_feat.to(args.device)
@@ -464,6 +521,7 @@ if __name__ == '__main__':
         drdipr_graph, data = dgl_heterograph(data, data['X_train'][fold_idx], args)
         drdipr_graph = drdipr_graph.to(args.device)
         train_positive_edges = positive_training_edges(data['X_train'][fold_idx], data['Y_train'][fold_idx])
+        train_positive_edges_tensor = torch.as_tensor(train_positive_edges, dtype=torch.long, device=args.device)
         eval_prior, train_prior = build_path_prior(data, train_positive_edges, args)
         eval_prior = eval_prior.to(args.device)
         train_prior = train_prior.to(args.device)
@@ -478,13 +536,14 @@ if __name__ == '__main__':
             model.train()
             cl_weight = contrastive_weight_for_epoch(epoch, args)
             ranking_weight, hard_neg_weight = aux_loss_weights(epoch, args)
+            topology_reg_weight, positive_reg_weight = structure_loss_weights(epoch, args)
             focal_weight = focal_weight_for_epoch(epoch, args)
             classification_cfg = classification_phase(epoch, args)
             train_pair_prior = gather_pair_values(x_train, train_prior, args.device)
             train_edge_stats = {
                 'pair_bias': args.path_bias_scale * train_pair_prior
             }
-            _, train_score, cl_loss = model(
+            _, train_score, aux_losses = model(
                 drdr_graph,
                 didi_graph,
                 drdipr_graph,
@@ -495,7 +554,9 @@ if __name__ == '__main__':
                 disease_topo_feat,
                 x_train,
                 edge_stats=train_edge_stats,
+                return_aux=True,
             )
+            cl_loss = aux_losses['contrastive']
             sample_weights = build_sample_weights(
                 train_score,
                 y_train,
@@ -515,6 +576,18 @@ if __name__ == '__main__':
             hard_neg_loss = hard_negative_mining_loss(
                 train_score, y_train, top_ratio=args.hard_negative_ratio, margin=args.hard_negative_margin
             )
+            topology_loss = graph_smoothness_loss(
+                aux_losses['drug_repr'], drug_similarity_reg, max_edges=args.reg_edge_samples
+            )
+            topology_loss = topology_loss + graph_smoothness_loss(
+                aux_losses['disease_repr'], disease_similarity_reg, max_edges=args.reg_edge_samples
+            )
+            positive_reg_loss = positive_pair_topology_loss(
+                aux_losses['drug_repr'],
+                aux_losses['disease_repr'],
+                train_positive_edges_tensor,
+                max_pairs=args.reg_positive_samples,
+            )
             focal_loss = focal_classification_loss(
                 train_score,
                 y_train,
@@ -527,6 +600,8 @@ if __name__ == '__main__':
                 + cl_weight * cl_loss
                 + ranking_weight * ranking_loss
                 + hard_neg_weight * hard_neg_loss
+                + topology_reg_weight * topology_loss
+                + positive_reg_weight * positive_reg_loss
                 + focal_weight * focal_loss
             )
 

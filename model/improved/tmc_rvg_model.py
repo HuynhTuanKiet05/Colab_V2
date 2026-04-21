@@ -277,6 +277,7 @@ class TMC_AMDGT_RVG(nn.Module):
         disease_topo_feat,
         sample,
         edge_stats=None,
+        return_aux=False,
     ):
         drug_sim = self.gt_drug(drdr_graph)
         disease_sim = self.gt_disease(didi_graph)
@@ -322,5 +323,14 @@ class TMC_AMDGT_RVG(nn.Module):
             output = gate * hybrid_logits + (1.0 - gate) * elementwise_logits
         else:
             output = self.hybrid_pair_decoder(pair_drug, pair_disease, topology_score=topology_score, pair_bias=pair_bias)
+
+        if return_aux:
+            aux = {
+                'contrastive': contrastive,
+                'drug_repr': drug_repr,
+                'disease_repr': disease_repr,
+                'topology_score': topology_score.detach(),
+            }
+            return drug_repr, output, aux
 
         return drug_repr, output, contrastive
